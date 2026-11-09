@@ -37,3 +37,14 @@ Close the three conditional fixes from the independent review (deleg_910e22ab, v
 
 ## Checkpoints
 - Step 3 output = final test count line; step 4 = validator rc 0; step 7 = final sha pin equal to HEAD.
+
+## DONE (2026-11-09 closeout)
+- Step 1: `_parse_strict_bool` at plugin/src/turn_completion_nudge.py:292; wired into _read_lane_config (:318-319) and _send_turn_text_opted_out (:331/:336/:342).
+- Step 2: tests `test_production_default_absent_key_dormant` + `test_string_false_send_turn_text_dormant` appended.
+- Step 3: pytest 56 passed (54 + 2), rc 0 — repo and live install both verified.
+- Step 4: hermes plugins validate → 15 checks, "Validation passed.", rc 0.
+- Step 5: live install byte-identical (sha256) for src + tests + plugin.yaml.
+- Step 6: plugin/docs/pi5_evidence.json duplicate removed (README keeps `docs/`); untracked deliverables committed.
+- Step 7: pin convention = latest plugin/-content commit; catalog sha 6b81c43, HEAD 14b1427 (bookkeeping one ahead by construction; pin_note documents this). Commits: 55dc51f, 55dafd2, 6b81c43, 14b1427.
+- Step 8: digest re-anchored (fail-open :582-691, timeout_s :453); contradictory empty `provides_commands: []` dropped (house standard: no official plugin declares that field; status CLI stays README+source-declared).
+- Remaining gate: operator authorizes the public push (no remote is configured on this clone by design).
