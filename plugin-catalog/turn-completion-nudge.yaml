@@ -1,6 +1,6 @@
 name: turn-completion-nudge
 repo: https://github.com/ether-btc/turn-completion-nudge
-sha: 2c5e6608e3ea3fa824c4c3d967c1b53df0d20d81
+sha: 55dc51f502c9d671b14f972574218ec9ee2657fa
 subdir: "plugin"
 description: "Nudges the agent to continue when a turn ends prematurely (planning or announcing next steps it has not done). Fail-open: never blocks a turn."
 maintainer: ether-btc

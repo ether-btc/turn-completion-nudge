@@ -2,7 +2,7 @@
 
 ## What this PR adds
 
-One file: `plugin-catalog/turn-completion-nudge.yaml` — a NousResearch/hermes-agent plugin catalog entry for `ether-btc/turn-completion-nudge`, pinned to commit `2c5e6608e3ea3fa824c4c3d967c1b53df0d20d81` (version 0.3.0), `subdir: plugin`. Entry shape mirrors `plugin-catalog/ram-first-context.yaml` (fields: name, repo, sha, subdir, description, maintainer, tier, category, requires_hermes, version, known_issues, capabilities).
+One file: `plugin-catalog/turn-completion-nudge.yaml` — a NousResearch/hermes-agent plugin catalog entry for `ether-btc/turn-completion-nudge`, pinned to commit `55dc51f502c9d671b14f972574218ec9ee2657fa` (version 0.3.0), `subdir: plugin`. Entry shape mirrors `plugin-catalog/ram-first-context.yaml` (fields: name, repo, sha, subdir, description, maintainer, tier, category, requires_hermes, version, known_issues, capabilities).
 
 ## What the plugin does
 
@@ -23,7 +23,7 @@ Status command: `hermes turn-completion-nudge status` (enabled, opted-in, thresh
 ## Pin
 
 - repo: https://github.com/ether-btc/turn-completion-nudge
-- sha: 2c5e6608e3ea3fa824c4c3d967c1b53df0d20d81 (full 40-hex = current HEAD of `~/projects/turn-completion-nudge`; tree clean apart from this draft's two new files; no remote configured yet — push is operator-gated)
+- sha: 55dc51f502c9d671b14f972574218ec9ee2657fa (full 40-hex = current HEAD of `~/projects/turn-completion-nudge`; tree clean apart from this draft's two new files; no remote configured yet — push is operator-gated)
 - subdir: plugin
 - version: 0.3.0 (matches the pinned code)
 
@@ -57,7 +57,7 @@ Net diff vs 66cabd7: only `plugin/src/turn_completion_nudge.py` changed (`_send_
 
 **WP-6 review (NO-GO for public push) covered commit `66cabd7` only** (tree digest 2c0b657af2f4aef82bead66a9548196237b45950ac46011daeb9fe7253fad71a, start==end): egress blocker reproduced at the default install; lane ladder, hygiene cap, zero-writes, capability declarations, and F1/F2 fixes verified clean — 54/54 tests. WP-6 standing rule: fresh review required after ANY source/test/README/plugin.yaml edit.
 
-The pinned commit `2c5e6608...` POST-DATES that review (source edit: `_send_turn_text_opted_out`). The catalog entry is drafted, but the upstream PR must NOT be opened until a fresh review of `66cabd7..2c5e660` is done and the WP-6 gate is re-evaluated.
+The pinned commit `55dc51f5...` POST-DATES that review (source edit: `_send_turn_text_opted_out`). The catalog entry is drafted, but the upstream PR must NOT be opened until a fresh review of `66cabd7..2c5e660` is done and the WP-6 gate is re-evaluated.
 
 ## Operator gate
 
