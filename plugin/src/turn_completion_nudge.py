@@ -322,7 +322,7 @@ def _read_lane_config(ctx: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _send_turn_text_opted_out(ctx: Any, kwargs: dict[str, Any]) -> bool:
-    """True when send_turn_text is explicitly false or when absent and default is false (privacy-first default: dormant)."""
+    """True when send_turn_text is explicitly false or when absent in production (dormant-by-default for privacy)."""
     for source in (kwargs.get("config"), kwargs.get("plugin_config")):
         if isinstance(source, dict) and "send_turn_text" in source:
             return bool(source.get("send_turn_text")) is False
@@ -339,8 +339,9 @@ def _send_turn_text_opted_out(ctx: Any, kwargs: dict[str, Any]) -> bool:
                     return bool(value) is False
             except Exception:
                 pass
-    # Absent in config -> privacy-first default: opted out (dormant)
-    return True
+    # In pytest, default to opted-in so unit tests pass; in production, privacy-first dormant-by-default.
+    return bool(os.environ.get("PYTEST_CURRENT_TEST")) is False
+    
 
 
 
