@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "turn-completion-nudge"
+version = "0.3.0"
+description = "Hermes plugin: nudges the agent to continue when a turn ends prematurely (planning or announcing next steps it has not done). Fail-open — never blocks a turn. Pure stdlib."
+requires-python = ">=3.9"
+dependencies = []
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "ether-btc"}]
+
+[project.urls]
+Repository = "https://github.com/ether-btc/turn-completion-nudge"
