@@ -13,7 +13,6 @@ optional_env:
     description: "Amos-hosted systemone fallback endpoint (keyless, no API key required). Default: https://api.amos.scira.ai/v1/systemone"
 provides_hooks:
   - post_llm_call
-provides_commands: []
 config_schema:
   enabled:
     type: bool
