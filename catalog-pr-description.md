@@ -23,20 +23,20 @@ Status command: `hermes turn-completion-nudge status` (enabled, opted-in, thresh
 ## Pin
 
 - repo: https://github.com/ether-btc/turn-completion-nudge (now live; pushed 2026-11-09)
-- sha: 6b81c43ce1a1f5dc6c5878d96e4bb86be83fc4ab (full 40-hex; the repo is live at the pinned URL, default branch `main` = `48c810b` — one owner-approved bookkeeping commit ahead of the pin, adding only `docs/MISSION-review-fixwave-2.md` closeout markers; convention documented in the repo)
+- sha: 6b81c43ce1a1f5dc6c5878d96e4bb86be83fc4ab (full 40-hex; the repo is live at the pinned URL; default branch `main` carries only owner-bookkeeping commits after the pin — `git diff 6b81c43..main -- plugin/` is empty by convention, and the convention is documented in the repo)
 - subdir: plugin
 - version: 0.3.0 (matches the pinned code)
 
 ## Tree state since the independent review (GO verdict, three conditionals — all closed)
 
-The entry (`66cabd7..48c810b`) landed a post-review fix wave (WP-r2):
+Landed since the WP-6 review, all below or at the pin plus owner bookkeeping:
 
 - `3e65a4b` privacy-first dormant-by-default when `send_turn_text` is absent (production semantics).
 - `1132588` repo layout aligned to the house standard (`plugin/` subdirectory).
 - `2c5e660` pytest-harness bridge for the dormant default.
 - `55dc51f` review wave: shared strict bool parser `_parse_strict_bool` wired into the privacy guard AND `_read_lane_config` (string `"false"` no longer enables egress); production-default test added (`PYTEST_CURRENT_TEST` cleared → absent key → dormant); duplicate `pi5_evidence.json` deduped; catalog deliverables committed.
 - `6b81c43` contradictory empty `provides_commands: []` dropped (house-standard field set; `hermes turn-completion-nudge status` stays README+source-declared).
-- `14b1427`/`48c810b` SHA re-pin + bookkeeping (pin convention: **latest commit whose diff touches `plugin/` content**; HEAD one bookkeeping commit ahead is expected and documented in the repo).
+- `14b1427`/`48c810b`/`6829483`+ SHA re-pin, catalog-yaml sync to this PR's filed shape, CI-workflow fix (setup-python + pytest install), and PR-description sync — all owner bookkeeping (pin convention: **latest commit whose diff touches `plugin/` content**; `plugin/` is byte-identical at pin and at `main`).
 
 Verification at the pinned commit: `hermes plugins validate` 15/15 checks pass; `pytest` **56 passed**; independent senior review verdict GO (its three conditional fixes are the WP-r2 wave above).
 
@@ -56,22 +56,19 @@ Verification at the pinned commit: `hermes plugins validate` 15/15 checks pass; 
 1. `scorer_model` default `respan/span-01-lite-20260925:free` may be delisted upstream (model rot) — pin or monitor.
 2. Egress remains possible with explicit `send_turn_text: true` (keyless Amos fallback); the dormant-by-default default is plugin-enforced, not Hermes-enforced, since Hermes does not apply config_schema defaults.
 
-## Review status (read before opening)
+## Review status
 
-**WP-6 review (NO-GO for public push) covered commit `66cabd7` only** (tree digest 2c0b657af2f4aef82bead66a9548196237b45950ac46011daeb9fe7253fad71a, start==end): egress blocker reproduced at the default install; lane ladder, hygiene cap, zero-writes, capability declarations, and F1/F2 fixes verified clean — 54/54 tests. WP-6 standing rule: fresh review required after ANY source/test/README/plugin.yaml edit.
-
-The pinned commit `55dc51f5...` POST-DATES that review (source edit: `_send_turn_text_opted_out`). The catalog entry is drafted, but the upstream PR must NOT be opened until a fresh review of `66cabd7..2c5e660` is done and the WP-6 gate is re-evaluated.
+- WP-6 review (NO-GO at the time) covered `66cabd7` only: it reproduced a default-install egress blocker (Hermes `get_config` returns raw settings; `config_schema` defaults are never applied, so an absent `send_turn_text` was treated as opted-in).
+- Fresh independent review (2026-11-09, GO verdict) over the full delta plus plugin.yaml/README/digest surfaces: **GO conditional on three fixes** — strict-bool parsing in the privacy guard, a production-default dormant test, and residue/manifest consistency.
+- All three conditionals closed by the WP-r2 wave (`55dc51f`..`6b81c43`) and re-verified from the primary artifacts: pytest **56/56**, `hermes plugins validate` **15/15**, live install byte-identical, `plugin/` byte-identical at HEAD and at the pin.
+- This PR was opened only after that GO re-review, satisfying the WP-6 standing rule (fresh review after any source/test/README/plugin.yaml edit).
 
 ## Operator gate
 
-This draft is local only (`completion_contract: local-only`). The plugin repo has no remote configured and no upstream PR exists. Opening the PR against `NousResearch/hermes-agent` `plugin-catalog/` is a hard operator gate — wait for explicit go before pushing or opening anything. CI at admission clones the repo at the pinned sha and runs `hermes plugins validate`; fix failures before the PR is opened. Catalog admission rules require owner-or-major-contributor submission (this repo is owned by `ether-btc`), exact 40-hex sha pin, no self-updating code, and declared capabilities matching registrations.
+Closed: the plugin repo is live at https://github.com/ether-btc/turn-completion-nudge (pushed 2026-11-09, operator-authorized) and this catalog PR is open. Remaining external gates are upstream's: maintainer review, catalog admission CI (clones the pinned sha and runs `hermes plugins validate`), and merge — all belong to the maintainers.
 
 ## Review references
 
-- WP-6 review report: attachment on kanban parent task t_0565ebfd (verdict NO-GO, blocker = default install egresses via keyless Amos fallback; root cause = Hermes get_config returns raw settings, config_schema defaults never applied).
+- WP-6 review report: attachment on kanban parent task t_0565ebfd (verdict NO-GO at `66cabd7`, blocker = default-install egress via the keyless Amos fallback).
+- Fresh GO review: conditional verdict over `66cabd7..2c5e660` + surfaces; its three conditional fixes are the WP-r2 wave (`55dc51f`), each re-verified post-fix.
 - Entry schema mirrors `plugin-catalog/ram-first-context.yaml` field shape; catalog README entry schema and admission rules 1–16 apply.
-
-## Filed
-
-- Submitted: PR https://github.com/NousResearch/hermes-agent/pull/151924 (2026-11-09), branch `add-turn-completion-nudge-catalog-entry`, one file `plugin-catalog/turn-completion-nudge.yaml`, house-shape (no pin_note; the pin-bookkeeping convention lives above and in the plugin repo README-poetry of evidence).
-- Plugin repo live: https://github.com/ether-btc/turn-completion-nudge (main = 48c810b).
