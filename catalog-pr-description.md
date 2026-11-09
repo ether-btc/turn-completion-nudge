@@ -2,7 +2,7 @@
 
 ## What this PR adds
 
-One file: `plugin-catalog/turn-completion-nudge.yaml` — a NousResearch/hermes-agent plugin catalog entry for `ether-btc/turn-completion-nudge`, pinned to commit `55dc51f502c9d671b14f972574218ec9ee2657fa` (version 0.3.0), `subdir: plugin`. Entry shape mirrors `plugin-catalog/ram-first-context.yaml` (fields: name, repo, sha, subdir, description, maintainer, tier, category, requires_hermes, version, known_issues, capabilities).
+One file: `plugin-catalog/turn-completion-nudge.yaml` — a NousResearch/hermes-agent plugin catalog entry for `ether-btc/turn-completion-nudge`, pinned to commit `6b81c43ce1a1f5dc6c5878d96e4bb86be83fc4ab` (version 0.3.0), `subdir: plugin`. Entry shape mirrors `plugin-catalog/ram-first-context.yaml` (fields: name, repo, sha, subdir, description, maintainer, tier, category, requires_hermes, version, known_issues, capabilities).
 
 ## What the plugin does
 
@@ -23,7 +23,7 @@ Status command: `hermes turn-completion-nudge status` (enabled, opted-in, thresh
 ## Pin
 
 - repo: https://github.com/ether-btc/turn-completion-nudge
-- sha: 55dc51f502c9d671b14f972574218ec9ee2657fa (full 40-hex = current HEAD of `~/projects/turn-completion-nudge`; tree clean apart from this draft's two new files; no remote configured yet — push is operator-gated)
+- sha: 6b81c43ce1a1f5dc6c5878d96e4bb86be83fc4ab (full 40-hex = current HEAD of `~/projects/turn-completion-nudge`; tree clean apart from this draft's two new files; no remote configured yet — push is operator-gated)
 - subdir: plugin
 - version: 0.3.0 (matches the pinned code)
 
