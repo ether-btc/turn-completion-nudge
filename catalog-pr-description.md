@@ -22,20 +22,23 @@ Status command: `hermes turn-completion-nudge status` (enabled, opted-in, thresh
 
 ## Pin
 
-- repo: https://github.com/ether-btc/turn-completion-nudge
-- sha: 6b81c43ce1a1f5dc6c5878d96e4bb86be83fc4ab (full 40-hex = current HEAD of `~/projects/turn-completion-nudge`; tree clean apart from this draft's two new files; no remote configured yet — push is operator-gated)
+- repo: https://github.com/ether-btc/turn-completion-nudge (now live; pushed 2026-11-09)
+- sha: 6b81c43ce1a1f5dc6c5878d96e4bb86be83fc4ab (full 40-hex; the repo is live at the pinned URL, default branch `main` = `48c810b` — one owner-approved bookkeeping commit ahead of the pin, adding only `docs/MISSION-review-fixwave-2.md` closeout markers; convention documented in the repo)
 - subdir: plugin
 - version: 0.3.0 (matches the pinned code)
 
-## Tree state since the WP-5 scaffold (commit 66cabd7)
+## Tree state since the independent review (GO verdict, three conditionals — all closed)
 
-Three owner commits landed after the WP-5 scaffold (all `ether-btc`, 2026-11-09 12:24–12:25):
+The entry (`66cabd7..48c810b`) landed a post-review fix wave (WP-r2):
 
-- `3e65a4b` Fix privacy-first dormant-by-default send_turn_text and update unit tests — plugin-level dormant-by-default when `send_turn_text` is absent; pytest harness bridge opts tests in.
-- `1132588` Align repository structure with house standard ram-first-context (plugin/ subdirectory) — moved code under `plugin/src/` per the ram-first-context layout.
-- `2c5e660` Fix privacy-first dormant-by-default with pytest test harness bridge — production default opted-out when `send_turn_text` absent.
+- `3e65a4b` privacy-first dormant-by-default when `send_turn_text` is absent (production semantics).
+- `1132588` repo layout aligned to the house standard (`plugin/` subdirectory).
+- `2c5e660` pytest-harness bridge for the dormant default.
+- `55dc51f` review wave: shared strict bool parser `_parse_strict_bool` wired into the privacy guard AND `_read_lane_config` (string `"false"` no longer enables egress); production-default test added (`PYTEST_CURRENT_TEST` cleared → absent key → dormant); duplicate `pi5_evidence.json` deduped; catalog deliverables committed.
+- `6b81c43` contradictory empty `provides_commands: []` dropped (house-standard field set; `hermes turn-completion-nudge status` stays README+source-declared).
+- `14b1427`/`48c810b` SHA re-pin + bookkeeping (pin convention: **latest commit whose diff touches `plugin/` content**; HEAD one bookkeeping commit ahead is expected and documented in the repo).
 
-Net diff vs 66cabd7: only `plugin/src/turn_completion_nudge.py` changed (`_send_turn_text_opted_out`: absence of `send_turn_text` now means opted out in production). `plugin.yaml`, README, tests layout otherwise unchanged from the scaffold.
+Verification at the pinned commit: `hermes plugins validate` 15/15 checks pass; `pytest` **56 passed**; independent senior review verdict GO (its three conditional fixes are the WP-r2 wave above).
 
 ## Rule 13 disclosures (risky behaviour)
 
@@ -67,3 +70,8 @@ This draft is local only (`completion_contract: local-only`). The plugin repo ha
 
 - WP-6 review report: attachment on kanban parent task t_0565ebfd (verdict NO-GO, blocker = default install egresses via keyless Amos fallback; root cause = Hermes get_config returns raw settings, config_schema defaults never applied).
 - Entry schema mirrors `plugin-catalog/ram-first-context.yaml` field shape; catalog README entry schema and admission rules 1–16 apply.
+
+## Filed
+
+- Submitted: PR https://github.com/NousResearch/hermes-agent/pull/151924 (2026-11-09), branch `add-turn-completion-nudge-catalog-entry`, one file `plugin-catalog/turn-completion-nudge.yaml`, house-shape (no pin_note; the pin-bookkeeping convention lives above and in the plugin repo README-poetry of evidence).
+- Plugin repo live: https://github.com/ether-btc/turn-completion-nudge (main = 48c810b).
