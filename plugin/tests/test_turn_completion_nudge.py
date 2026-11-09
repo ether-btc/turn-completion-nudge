@@ -762,3 +762,45 @@ def test_lane_amos_fallback_on_placeholder_key(monkeypatch):
         )
     assert mod._METRICS.snapshot()["buckets"]["lane_amos"] == 1
     m_am.assert_called_once()
+
+
+def test_production_default_absent_key_dormant(monkeypatch):
+    """Default install under PRODUCTION semantics: absent send_turn_text -> dormant, no scorer, no egress.
+
+    Clears PYTEST_CURRENT_TEST so the guard takes its production branch (the exact
+    scenario the WP-6 review blocked on; regression here would keep the pytest bridge green).
+    """
+    import src.turn_completion_nudge as mod
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    ctx, injected = _make_ctx()
+    with patch(f"{MODULE}._jev_score") as m_or, patch(f"{MODULE}._amos_score") as m_am:
+        _call(
+            ctx,
+            tier="full",
+            final_message="I will do next step",
+            user_request="do task",
+        )
+    assert mod._METRICS.snapshot()["buckets"]["dormant"] == 1
+    m_or.assert_not_called()
+    m_am.assert_not_called()
+    assert injected == []
+
+
+def test_string_false_send_turn_text_dormant():
+    """Config send_turn_text="false" (string) must be dormant too (strict bool parse guard)."""
+    import src.turn_completion_nudge as mod
+
+    ctx, injected = _make_ctx()
+    with patch(f"{MODULE}._jev_score") as m_or, patch(f"{MODULE}._amos_score") as m_am:
+        _call(
+            ctx,
+            tier="full",
+            final_message="I will do next step",
+            user_request="do task",
+            config={"send_turn_text": "false", "enabled": True},
+        )
+    assert mod._METRICS.snapshot()["buckets"]["dormant"] == 1
+    m_or.assert_not_called()
+    m_am.assert_not_called()
+    assert injected == []

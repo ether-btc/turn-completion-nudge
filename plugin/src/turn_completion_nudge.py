@@ -289,6 +289,13 @@ def _config_get(ctx: Any, kwargs: dict[str, Any], key: str, default: Any = None)
     return default
 
 
+def _parse_strict_bool(value: Any, default: bool) -> bool:
+    """Strict bool parse: strings accept only true/1/yes (case-insensitive, whitespace-stripped); non-strings fall back to bool()."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return bool(value) if value is not None else default
+
+
 def _read_lane_config(ctx: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     """Read the full lane config live (enabled, send_turn_text, models, threshold, timeout)."""
     enabled = _config_get(ctx, kwargs, "enabled", True)
@@ -312,8 +319,8 @@ def _read_lane_config(ctx: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         threshold = _DEFAULT_THRESHOLD
     return {
-        "enabled": bool(enabled) if not isinstance(enabled, str) else enabled.lower() in ("true", "1", "yes"),
-        "send_turn_text": bool(send_turn_text) if not isinstance(send_turn_text, str) else send_turn_text.lower() in ("true", "1", "yes"),
+        "enabled": _parse_strict_bool(enabled, True),
+        "send_turn_text": _parse_strict_bool(send_turn_text, False),
         "scorer_model": str(scorer_model) if scorer_model is not None else _DEFAULT_SCORER_MODEL,
         "amos_model": str(amos_model) if amos_model is not None else _DEFAULT_AMOS_MODEL,
         "threshold": threshold,
@@ -322,27 +329,25 @@ def _read_lane_config(ctx: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _send_turn_text_opted_out(ctx: Any, kwargs: dict[str, Any]) -> bool:
-    """True when send_turn_text is explicitly false or when absent in production (dormant-by-default for privacy)."""
+    """True when send_turn_text is NOT strictly true, or absent in production (dormant-by-default for privacy)."""
     for source in (kwargs.get("config"), kwargs.get("plugin_config")):
         if isinstance(source, dict) and "send_turn_text" in source:
-            return bool(source.get("send_turn_text")) is False
+            return not _parse_strict_bool(source.get("send_turn_text"), False)
     if ctx is not None:
         for attr in ("config", "plugin_config"):
             source = getattr(ctx, attr, None)
             if isinstance(source, dict) and "send_turn_text" in source:
-                return bool(source.get("send_turn_text")) is False
+                return not _parse_strict_bool(source.get("send_turn_text"), False)
         method = getattr(ctx, "get_config", None)
         if callable(method):
             try:
                 value = method("send_turn_text")
                 if value is not None:
-                    return bool(value) is False
+                    return not _parse_strict_bool(value, False)
             except Exception:
                 pass
     # In pytest, default to opted-in so unit tests pass; in production, privacy-first dormant-by-default.
     return bool(os.environ.get("PYTEST_CURRENT_TEST")) is False
-    
-
 
 
 def _derive_turn_id(kwargs: dict[str, Any]) -> str | None:
