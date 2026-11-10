@@ -1,4 +1,9 @@
-3c8ac335d0b3963b595832e5625bd145ee4dbe176458eda1ed6ef6aa0e8bec8b  plugin.yaml
-6b5416d5848e312e0c72c3971c707b31555d2500be67606fa1a02c6f3b5fb655  __init__.py
-2d295ccca70c8183d8e90105925507c0e95d9ebf344a39488955ac276c4e62e3  src/turn_completion_nudge.py
-2a20de7b749559ed9a72f3bca1d10df17d6c8a91fd159bf16ad5032d26559ead  tests/test_turn_completion_nudge.py
+live-install byte-identity (sha256) after review-round sync v0.3.1, 2026-11-10T10:40:05+01:00
+c3c51fc588750ab4666afe6fd60bf36b7651ee65ddf90019b4a357cfda36778b  plugin/plugin.yaml
+6b5416d5848e312e0c72c3971c707b31555d2500be67606fa1a02c6f3b5fb655  plugin/__init__.py
+b7b7f547d01736b3f7c12ed9ef3e65325941813716e5085f49a8750bbbe7d8ba  plugin/src/turn_completion_nudge.py
+be3a5eb71d70c32f750df79fd0b3f77867e37d9d14f724362a42b25e62141ea5  plugin/tests/test_turn_completion_nudge.py
+c3c51fc588750ab4666afe6fd60bf36b7651ee65ddf90019b4a357cfda36778b  /home/hermes-pi/.hermes/plugins/turn-completion-nudge/plugin.yaml
+6b5416d5848e312e0c72c3971c707b31555d2500be67606fa1a02c6f3b5fb655  /home/hermes-pi/.hermes/plugins/turn-completion-nudge/__init__.py
+b7b7f547d01736b3f7c12ed9ef3e65325941813716e5085f49a8750bbbe7d8ba  /home/hermes-pi/.hermes/plugins/turn-completion-nudge/src/turn_completion_nudge.py
+be3a5eb71d70c32f750df79fd0b3f77867e37d9d14f724362a42b25e62141ea5  /home/hermes-pi/.hermes/plugins/turn-completion-nudge/tests/test_turn_completion_nudge.py
