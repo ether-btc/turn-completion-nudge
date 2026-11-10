@@ -5,7 +5,7 @@ Hermes plugin: nudges the agent to continue when a turn ends prematurely (planni
 ## Badges
 
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/ether-btc/turn-completion-nudge/actions)
-[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](https://github.com/ether-btc/turn-completion-nudge/releases/tag/v0.3.0)
+[![Version](https://img.shields.io/badge/version-0.3.1-blue.svg)](https://github.com/ether-btc/turn-completion-nudge/releases/tag/v0.3.1)
 [![Hermes](https://img.shields.io/badge/hermes-%3E=0.21.3-blue.svg)](https://github.com/NousResearch/hermes-agent)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -17,8 +17,9 @@ A standalone Hermes plugin (`kind: standalone`, `requires_hermes: >=0.21.3`) tha
 
 - Hooks: `post_llm_call` (fail-open — scoring or network problems never block a turn)
 - Commands: `hermes turn-completion-nudge status` (process-local: enabled/opted-in/threshold/last-5-scores/bucket counts)
-- Scorer lane ladder: OpenRouter decisions lane first (`scorer_model`, key from `OPENROUTER_API_KEY` only), then one keyless Amos systemone fallback hop on missing key / HTTP failure / timeout; buckets `lane_openrouter` / `lane_amos` / `lane_failed` / `dormant`; served model logged per call
+- Scorer lane ladder: OpenRouter decisions lane first (`scorer_model`, key from `OPENROUTER_API_KEY`); the keyless Amos systemone fallback is a **separate opt-in** (`amos_fallback`, default off — OpenRouter failure without it records `lane_failed` and stops, no second third-party egress); buckets `lane_openrouter` / `lane_amos` / `lane_failed` / `dormant`; served model logged per call
 - Privacy: `send_turn_text` defaults to false — dormant by default, no scoring calls, no egress
+- Nudge hygiene: bounded per-turn guard (cap 1024, drop-oldest) plus a consecutive-nudge cap of 2 (nudge-driven turns are recognized by the injected text and the chain stops after two hops)
 - Resource hygiene: bounded per-turn guard (cap 1024, drop-oldest), in-process counters only, zero writes outside the plugin directory
 - Hardware fitness: pure stdlib (`urllib`, `json`, `threading`); measured Pi5 round-trips under 5 s — see `docs/pi5_evidence.json`
 
@@ -42,8 +43,7 @@ Environment variables:
 
 | Variable | Kind | Description |
 | --- | --- | --- |
-| `OPENROUTER_API_KEY` | `requires_env`, `secret: true` | OpenRouter API key for the scorer lane. Optional — unset or a template/placeholder value (empty, `REPLACE*`, `your-key*`) fails open to the keyless Amos fallback, and a placeholder-shaped key warns exactly once in the logs. Read only from the declared env var, never from `.env`. |
-| `HERMES_AMOS_BASE_URL` | `optional_env` | Amos-hosted systemone fallback endpoint override (keyless, no API key required). Default: `https://api.amos.scira.ai/v1/systemone`. |
+| `OPENROUTER_API_KEY` | `requires_env`, `secret: true` | OpenRouter API key for the scorer lane. Optional — unset or a template/placeholder value (empty, `REPLACE*`, `your-key*`) fails open, and a placeholder-shaped key warns exactly once in the logs. Read via the Hermes secret scope when available (profile-scoped secrets in multi-profile gateways), else the declared env var — never `.env`. |
 
 Config schema (settings form, read live per call via `ctx.get_config`):
 
@@ -54,7 +54,9 @@ Config schema (settings form, read live per call via `ctx.get_config`):
 | `threshold` | float | 0.2 | Score below this triggers a continuation nudge (0–1) |
 | `timeout_s` | int | 4 | Per-hop scorer timeout in seconds |
 | `scorer_model` | str | `respan/span-01-lite-20260925:free` | OpenRouter decisions model; models can be delisted (rot) — pin or monitor |
-| `amos_model` | str | `medium` | Amos systemone fallback model (server may serve smaller — log the served id) |
+| `amos_model` | str | `medium` | Keyless Amos systemone fallback model, used ONLY when `amos_fallback` is true (server may serve smaller — log the served id) |
+| `amos_fallback` | bool | false | Second opt-in: allow the keyless Amos/Scira systemone hop on OpenRouter missing key / failure / timeout. Off by default — no second third-party service without an explicit yes |
+| `amos_base_url` | str | `https://api.amos.scira.ai/v1/systemone` | Amos systemone endpoint override (non-secret config) |
 
 ## On-off switch
 
@@ -74,7 +76,7 @@ Config schema (settings form, read live per call via `ctx.get_config`):
 | Symptom | Check |
 | --- | --- |
 | No nudge despite incomplete turns | `hermes turn-completion-nudge status` (process-local): enabled/opted-in, threshold, buckets, last 5 scores |
-| OpenRouter lane silent | `hermes logs` — an empty or placeholder `OPENROUTER_API_KEY` warns exactly once; the lane fails open to Amos |
+| OpenRouter lane silent | `hermes logs` — an empty or placeholder `OPENROUTER_API_KEY` warns exactly once; with `amos_fallback: false` (default) no further egress happens |
 | All scorer lanes failed | `lane_failed` bucket increments; the hook returns `None` (fail-open, the turn continues) |
 | Debug | `HERMES_*_DEBUG` flags plus `hermes logs`; each scored call logs its lane, score, and served model |
 
@@ -88,4 +90,4 @@ Config schema (settings form, read live per call via `ctx.get_config`):
 
 MIT (SPDX: MIT). Copyright (c) 2026 ether-btc. See LICENSE.
 
-Privacy disclosure: turn-completion-nudge never shares your turn text by default. `send_turn_text` is `false` by default, so the plugin runs dormant — one INFO line per enable session explains why, no scoring calls are made, and no egress occurs. When opted in, each scoring call sends exactly one clipped payload (~1200-char user request + ~1500-char assistant message) to the configured scorer endpoint; vendors may retain requests. The OpenRouter key is read only from the declared `OPENROUTER_API_KEY` environment variable — never from `.env` files.
+Privacy disclosure: turn-completion-nudge never shares your turn text by default. `send_turn_text` is `false` by default, so the plugin runs dormant — one INFO line per enable session explains why, no scoring calls are made, and no egress occurs. When opted in, each scoring call sends exactly one clipped payload (~1200-char user request + ~1500-char assistant message) to the configured scorer endpoint; vendors may retain requests. The keyless Amos/Scira fallback is its own opt-in (`amos_fallback`, default false): opting into OpenRouter alone never sends anything to a second third-party service. The OpenRouter key is read via the Hermes secret scope when available (profile-scoped secrets), falling back to the declared `OPENROUTER_API_KEY` environment variable — never from `.env` files.

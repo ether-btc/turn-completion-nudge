@@ -1,16 +1,13 @@
 name: turn-completion-nudge
-version: "0.3.0"
+version: "0.3.1"
 description: "Nudges the agent to continue when a turn ends prematurely (planning or announcing next steps it has not done). Fail-open: never blocks a turn."
 author: "ether-btc"
 kind: standalone
 requires_hermes: ">=0.21.3"
 requires_env:
   - name: OPENROUTER_API_KEY
-    description: "OpenRouter API key for the configured scorer lane (OpenRouter decisions API, https://openrouter.ai/api/alpha/decisions). Optional — when unset or a template/placeholder value, the plugin fails open to the keyless Amos systemone fallback and no OpenRouter egress occurs."
+    description: "OpenRouter API key for the configured scorer lane (OpenRouter decisions API, https://openrouter.ai/api/alpha/decisions). Read via the Hermes secret scope when available (profile-scoped secrets), else the declared env var — never .env. Optional — when unset or a template/placeholder value, the plugin fails open (no further egress) and, with amos_fallback: true, may use the keyless Amos systemone fallback (a separate opt-in)."
     secret: true
-optional_env:
-  - name: HERMES_AMOS_BASE_URL
-    description: "Amos-hosted systemone fallback endpoint (keyless, no API key required). Default: https://api.amos.scira.ai/v1/systemone"
 provides_hooks:
   - post_llm_call
 config_schema:
@@ -43,4 +40,14 @@ config_schema:
     type: str
     default: medium
     label: Amos model
-    description: Fallback systemone model (server may serve a smaller model — log the served id).
+    description: Keyless Amos systemone fallback model, used ONLY when amos_fallback is true (server may serve a smaller model — log the served id).
+  amos_fallback:
+    type: bool
+    default: false
+    label: Amos fallback lane
+    description: Second opt-in for the keyless Amos/Scira systemone fallback on OpenRouter missing key/failure/timeout. Off by default — no second third-party service without an explicit yes.
+  amos_base_url:
+    type: str
+    default: https://api.amos.scira.ai/v1/systemone
+    label: Amos endpoint
+    description: Amos systemone endpoint override (non-secret config; default listed).

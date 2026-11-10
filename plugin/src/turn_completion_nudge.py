@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 _NUDGE_MESSAGE = (
     "It looks like you stopped mid-turn. Do you want to continue with the next step?"
 )
+_NUDGE_PREFIX = _NUDGE_MESSAGE
+# A turn whose request IS the injected nudge text is nudge-driven; after this
+# many consecutive chain hops, stop nudging (unbounded loops otherwise).
+_MAX_CONSECUTIVE_NUDGES = 2
 
 # Bound per-turn guard: turn ids already nudged this process lifetime.
 # Lives on the handler instance (captured at register time), not at module
@@ -29,7 +33,7 @@ _NUDGED_TURN_IDS = _MAX_NUDGED_TURN_IDS
 
 # Scorer lane endpoints and defaults.
 _OPENROUTER_URL = "https://openrouter.ai/api/alpha/decisions"
-_AMOS_URL = os.environ.get("HERMES_AMOS_BASE_URL", "https://api.amos.scira.ai/v1/systemone")
+_DEFAULT_AMOS_URL = "https://api.amos.scira.ai/v1/systemone"
 _DEFAULT_SCORER_MODEL = "respan/span-01-lite-20260925:free"
 _DEFAULT_AMOS_MODEL = "medium"
 _DEFAULT_THRESHOLD = 0.2
@@ -42,6 +46,26 @@ _LAST_LANE_CONFIG: dict[str, Any] = {}
 
 _PLACEHOLDER_KEY_FRAGMENTS = ("replace", "your-", "your_", "changeme", "change-me", "test-key", "placeholder", "insert", "sk-or-...")
 _PLACEHOLDER_KEY_WARNED = False
+
+
+def _read_openrouter_key() -> str | None:
+    """Read the OpenRouter key, preferring the Hermes secret scope.
+
+    Profile-scoped secrets live in the secret scope in multi-profile gateways;
+    a bare env read misses those. Fall back to the plain env var when the
+    scope is unavailable (standalone installs) or yields nothing.
+    """
+    try:
+        from agent.secret_scope import get_secret  # type: ignore[import-not-found]
+    except Exception:
+        return os.environ.get("OPENROUTER_API_KEY")
+    try:
+        value = get_secret("OPENROUTER_API_KEY")
+    except Exception:
+        return os.environ.get("OPENROUTER_API_KEY")
+    if isinstance(value, str) and value.strip():
+        return value
+    return os.environ.get("OPENROUTER_API_KEY")
 
 
 def _validate_openrouter_api_key(api_key: str | None) -> str | None:
@@ -297,7 +321,7 @@ def _parse_strict_bool(value: Any, default: bool) -> bool:
 
 
 def _read_lane_config(ctx: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Read the full lane config live (enabled, send_turn_text, models, threshold, timeout)."""
+    """Read the full lane config live (enabled, send_turn_text, models, threshold, timeout, amos fallback)."""
     enabled = _config_get(ctx, kwargs, "enabled", True)
     if enabled is None:
         enabled = True
@@ -308,6 +332,8 @@ def _read_lane_config(ctx: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
         ctx, kwargs, "scorer_model", _DEFAULT_SCORER_MODEL
     )
     amos_model = _config_get(ctx, kwargs, "amos_model", _DEFAULT_AMOS_MODEL)
+    amos_fallback = _config_get(ctx, kwargs, "amos_fallback", False)
+    amos_base_url = _config_get(ctx, kwargs, "amos_base_url", _DEFAULT_AMOS_URL)
     threshold = _config_get(ctx, kwargs, "threshold", _DEFAULT_THRESHOLD)
     timeout_s = _config_get(ctx, kwargs, "timeout_s", _DEFAULT_TIMEOUT_S)
     try:
@@ -323,13 +349,15 @@ def _read_lane_config(ctx: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
         "send_turn_text": _parse_strict_bool(send_turn_text, False),
         "scorer_model": str(scorer_model) if scorer_model is not None else _DEFAULT_SCORER_MODEL,
         "amos_model": str(amos_model) if amos_model is not None else _DEFAULT_AMOS_MODEL,
+        "amos_fallback": _parse_strict_bool(amos_fallback, False),
+        "amos_base_url": str(amos_base_url) if amos_base_url is not None else _DEFAULT_AMOS_URL,
         "threshold": threshold,
         "timeout_s": timeout_s,
     }
 
 
 def _send_turn_text_opted_out(ctx: Any, kwargs: dict[str, Any]) -> bool:
-    """True when send_turn_text is NOT strictly true, or absent in production (dormant-by-default for privacy)."""
+    """True when send_turn_text is NOT strictly true. Absent -> opted out (dormant-by-default) in EVERY context: one default path, no environment sniffing."""
     for source in (kwargs.get("config"), kwargs.get("plugin_config")):
         if isinstance(source, dict) and "send_turn_text" in source:
             return not _parse_strict_bool(source.get("send_turn_text"), False)
@@ -346,8 +374,9 @@ def _send_turn_text_opted_out(ctx: Any, kwargs: dict[str, Any]) -> bool:
                     return not _parse_strict_bool(value, False)
             except Exception:
                 pass
-    # In pytest, default to opted-in so unit tests pass; in production, privacy-first dormant-by-default.
-    return bool(os.environ.get("PYTEST_CURRENT_TEST")) is False
+    # Absent everywhere -> dormant. No PYTEST_CURRENT_TEST env sniffing: the
+    # production default IS the unit-test default (config passed explicitly).
+    return True
 
 
 def _derive_turn_id(kwargs: dict[str, Any]) -> str | None:
@@ -492,7 +521,7 @@ def _extract_served_model(parsed: Any, default: str) -> str:
 
 def _openrouter_score(user_request: Any, final_message: Any, tool_call_count: Any, any_write_edit_bash: Any, scorer_model: str, timeout_s: int) -> float:
     global _SERVED_MODEL, _PLACEHOLDER_KEY_WARNED
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+    api_key = _read_openrouter_key()
     issue = _validate_openrouter_api_key(api_key)
     if issue is not None:
         if not _PLACEHOLDER_KEY_WARNED:
@@ -511,11 +540,11 @@ def _openrouter_score(user_request: Any, final_message: Any, tool_call_count: An
     return score
 
 
-def _amos_score(user_request: Any, final_message: Any, tool_call_count: Any, any_write_edit_bash: Any, amos_model: str, timeout_s: int) -> float:
+def _amos_score(user_request: Any, final_message: Any, tool_call_count: Any, any_write_edit_bash: Any, amos_model: str, timeout_s: int, amos_base_url: str = _DEFAULT_AMOS_URL) -> float:
     global _SERVED_MODEL
     state = _build_state(user_request, final_message, tool_call_count, any_write_edit_bash)
     parsed = _post_json(
-        _AMOS_URL,
+        amos_base_url,
         _noul_body(amos_model, state),
         {"Content-Type": "application/json"},
         timeout_s,
@@ -558,6 +587,7 @@ class TurnCompletionNudge:
         self._guard_lock = threading.RLock()
         self._nudged_ids: set[str] = set()
         self._nudged_order: deque[str] = deque()
+        self._nudge_chain_depth = 0
 
     def _guard_turn(self, turn_id: str | None) -> bool:
         """Return True if the turn may be nudged (first eligible nudge).
@@ -622,8 +652,9 @@ class TurnCompletionNudge:
                 )
                 return None
 
-            # Lane ladder: OpenRouter first, one Amos fallback hop on
-            # missing key / HTTP failure / timeout.
+            # Lane ladder: OpenRouter first. The keyless Amos/Scira hop is a
+            # SECOND opt-in (amos_fallback) — never a silent second service:
+            # a user who opted into OpenRouter alone never egresses there.
             lane = None
             try:
                 p = _jev_score(
@@ -636,6 +667,14 @@ class TurnCompletionNudge:
                 )
                 lane = "lane_openrouter"
             except Exception:
+                if not config["amos_fallback"]:
+                    _METRICS.record("lane_failed")
+                    logger.warning(
+                        "turn-completion-nudge: OpenRouter lane failed and amos_fallback is not "
+                        "enabled; no further egress (fail-open). Set amos_fallback: true to "
+                        "allow the keyless Amos/Scira hop."
+                    )
+                    return None
                 try:
                     p = _amos_score(
                         user_request=clip_user_request(user_request),
@@ -644,6 +683,7 @@ class TurnCompletionNudge:
                         any_write_edit_bash=any_write_edit_bash(kwargs),
                         amos_model=config["amos_model"],
                         timeout_s=config["timeout_s"],
+                        amos_base_url=config["amos_base_url"],
                     )
                     lane = "lane_amos"
                 except Exception:
@@ -663,6 +703,20 @@ class TurnCompletionNudge:
             # complete -> nudge.
             if isinstance(p, (int, float)) and float(p) < config["threshold"]:
                 turn_id = _derive_turn_id(kwargs)
+                # Consecutive-nudge cap: a request that IS the injected nudge
+                # text is itself nudge-driven; bound the chain so a low-scoring
+                # loop cannot nudge forever (reviewer round-trip, 2026-11-09).
+                chain_hit = user_request.startswith(_NUDGE_PREFIX)
+                with self._guard_lock:
+                    if not chain_hit:
+                        self._nudge_chain_depth = 0
+                    elif self._nudge_chain_depth >= _MAX_CONSECUTIVE_NUDGES:
+                        _METRICS.record("no_nudge")
+                        logger.info(
+                            "turn-completion-nudge: consecutive-nudge cap (%d) reached; not nudging again this chain",
+                            _MAX_CONSECUTIVE_NUDGES,
+                        )
+                        return None
                 if not self._guard_turn(turn_id):
                     return None
                 inject = (
@@ -671,12 +725,20 @@ class TurnCompletionNudge:
                 if callable(inject):
                     accepted = inject(_NUDGE_MESSAGE)
                     if accepted:
+                        with self._guard_lock:
+                            self._nudge_chain_depth = (
+                                self._nudge_chain_depth + 1
+                                if chain_hit
+                                else 1
+                            )
                         _METRICS.record("nudge_injected")
                     else:
                         _METRICS.record("no_nudge")
                 else:
                     _METRICS.record("no_nudge")
             else:
+                with self._guard_lock:
+                    self._nudge_chain_depth = 0
                 _METRICS.record("no_nudge")
             return None
         except Exception:

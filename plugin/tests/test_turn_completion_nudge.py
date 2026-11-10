@@ -342,6 +342,7 @@ def test_on_post_llm_call_nudge_injected():
             tier="full",
             final_message="I will do next step",
             user_request="do task",
+            config={"send_turn_text": True, "enabled": True},  # opt-in explicit (no env defaults)
         )
     assert injected == [_NUDGE_MESSAGE]
     assert mod._METRICS.snapshot()["buckets"]["nudge_injected"] == 1
@@ -357,6 +358,7 @@ def test_on_post_llm_call_no_nudge():
             tier="full",
             final_message="I will do next step",
             user_request="do task",
+            config={"send_turn_text": True, "enabled": True},
         )
     assert injected == []
     assert mod._METRICS.snapshot()["buckets"]["no_nudge"] == 1
@@ -373,6 +375,7 @@ def test_on_post_llm_call_scoring_exception_fail_open():
             tier="full",
             final_message="I will do next step",
             user_request="do task",
+            config={"send_turn_text": True, "enabled": True, "amos_fallback": True},
         )
     assert result is None
     assert injected == []
@@ -386,7 +389,7 @@ def test_on_post_llm_call_inject_false_records_no_nudge():
     ctx.inject_message = lambda msg: False
     handler = TurnCompletionNudge(ctx)
     with patch(f"{MODULE}._jev_score", return_value=0.1):
-        handler.post_llm_call(turn_id="turn-1", tier="full", final_message="do next", user_request="task")
+        handler.post_llm_call(turn_id="turn-1", tier="full", final_message="do next", user_request="task", config={"send_turn_text": True, "enabled": True})
     assert mod._METRICS.snapshot()["buckets"]["no_nudge"] == 1
 
 
@@ -425,7 +428,8 @@ def test_on_post_llm_call_inject_message_triggers_turn_once_per_turn():
             turn_id="turn-1",
             tier="full",
             final_message="I will do next step",
-            user_request="do task",
+            user_request="task first run",
+            config={"send_turn_text": True, "enabled": True},
         )
         assert injected == [_NUDGE_MESSAGE]
         assert mod._METRICS.snapshot()["buckets"]["nudge_injected"] == 1
@@ -435,7 +439,8 @@ def test_on_post_llm_call_inject_message_triggers_turn_once_per_turn():
             turn_id="turn-1",
             tier="full",
             final_message="I will do next step",
-            user_request="do task",
+            user_request="task first run",
+            config={"send_turn_text": True, "enabled": True},
         )
         assert injected == [_NUDGE_MESSAGE]
         assert mod._METRICS.snapshot()["buckets"]["nudge_injected"] == 1
@@ -445,7 +450,8 @@ def test_on_post_llm_call_inject_message_triggers_turn_once_per_turn():
             turn_id="turn-2",
             tier="full",
             final_message="I will do next step",
-            user_request="do task",
+            user_request="task second run",
+            config={"send_turn_text": True, "enabled": True},
         )
         assert injected == [_NUDGE_MESSAGE, _NUDGE_MESSAGE]
         assert mod._METRICS.snapshot()["buckets"]["nudge_injected"] == 2
@@ -510,7 +516,7 @@ def test_lane_amos_fallback_on_openrouter_error():
             tier="full",
             final_message="I will do next step",
             user_request="do task",
-            config={"send_turn_text": True, "enabled": True},
+            config={"send_turn_text": True, "enabled": True, "amos_fallback": True},  # explicit second opt-in
         )
     assert mod._METRICS.snapshot()["buckets"]["lane_amos"] == 1
     m_am.assert_called_once()
@@ -528,7 +534,7 @@ def test_lane_amos_fallback_on_missing_key():
             tier="full",
             final_message="I will do next step",
             user_request="do task",
-            config={"send_turn_text": True, "enabled": True},
+            config={"send_turn_text": True, "enabled": True, "amos_fallback": True},
         )
     assert mod._METRICS.snapshot()["buckets"]["lane_amos"] == 1
     m_am.assert_called_once()
@@ -624,6 +630,7 @@ def test_contract_injects_nudge_exact_fire_site_payload_captured_ctx():
     import src.turn_completion_nudge as mod
 
     ctx, injected = _make_ctx()
+    ctx.get_config = lambda key: {"enabled": True, "send_turn_text": True}.get(key)
     handler = TurnCompletionNudge(ctx)
     with patch(f"{MODULE}._jev_score", return_value=0.1) as mock_score:
         handler.post_llm_call(
@@ -652,9 +659,10 @@ def test_contract_injects_nudge_exact_fire_site_payload_captured_ctx():
 
 
 def test_contract_scorer_still_runs_without_ctx_records_no_nudge():
-    """(b) Same fire-site shape with ctx absent (unit-level): scorer path still
-    runs and records no_nudge, documenting the real dispatch contract where the
-    dispatcher never injects ctx into hook callbacks.
+    """(b) Same fire-site shape with ctx absent (unit-level) but explicit
+    opted-in config: scorer path still runs and records no_nudge, documenting
+    the real dispatch contract where the dispatcher never injects ctx into
+    hook callbacks (standalone opt-in arrives as kwargs config).
     """
     import src.turn_completion_nudge as mod
 
@@ -672,6 +680,7 @@ def test_contract_scorer_still_runs_without_ctx_records_no_nudge():
             session_id="sess-1",
             task_id="task-1",
             tier="full",
+            config={"send_turn_text": True, "enabled": True},
         )
     assert mod._METRICS.snapshot()["buckets"]["no_nudge"] == 1
     mock_score.assert_called_once()
@@ -758,21 +767,20 @@ def test_lane_amos_fallback_on_placeholder_key(monkeypatch):
             tier="full",
             final_message="I will do next step",
             user_request="do task",
-            config={"send_turn_text": True, "enabled": True},
+            config={"send_turn_text": True, "enabled": True, "amos_fallback": True},
         )
     assert mod._METRICS.snapshot()["buckets"]["lane_amos"] == 1
     m_am.assert_called_once()
 
 
 def test_production_default_absent_key_dormant(monkeypatch):
-    """Default install under PRODUCTION semantics: absent send_turn_text -> dormant, no scorer, no egress.
+    """Default install semantics: absent send_turn_text -> dormant, no scorer, no egress.
 
-    Clears PYTEST_CURRENT_TEST so the guard takes its production branch (the exact
-    scenario the WP-6 review blocked on; regression here would keep the pytest bridge green).
+    The exact scenario the WP-6 review blocked on. There is no pytest env bridge:
+    absent means dormant in EVERY context, so this runs identically under pytest
+    and production (the WP-r2 fix, restated by the upstream 2026-11-09 review).
     """
     import src.turn_completion_nudge as mod
-
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     ctx, injected = _make_ctx()
     with patch(f"{MODULE}._jev_score") as m_or, patch(f"{MODULE}._amos_score") as m_am:
         _call(
@@ -804,3 +812,155 @@ def test_string_false_send_turn_text_dormant():
     m_or.assert_not_called()
     m_am.assert_not_called()
     assert injected == []
+
+
+# ---------- upstream 2026-11-10 review round: amos_fallback opt-in + nudge cap + secret scope ----------
+
+def test_amos_fallback_defaults_off_lane_failed():
+    """OpenRouter failure without optsk-in must NOT silently egress to Amos/Scira."""
+    import src.turn_completion_nudge as mod
+
+    ctx, injected = _make_ctx()
+    with patch(f"{MODULE}._jev_score", side_effect=JevScoreError("no key")), \
+         patch(f"{MODULE}._amos_score") as m_am:
+        result = _call(
+            ctx,
+            tier="full",
+            final_message="I will do next step",
+            user_request="do task",
+            config={"send_turn_text": True, "enabled": True},
+        )
+    assert result is None
+    assert mod._METRICS.snapshot()["buckets"]["lane_failed"] == 1
+    m_am.assert_not_called()
+    assert injected == []
+
+
+def test_lane_config_amos_keys():
+    """amos_fallback defaults false; string 'false' stays false; base URL default + override."""
+    import src.turn_completion_nudge as mod
+
+    defaults = mod._read_lane_config(None, {})
+    assert defaults["amos_fallback"] is False
+    assert defaults["amos_base_url"] == "https://api.amos.scira.ai/v1/systemone"
+    strict_false = mod._read_lane_config(None, {"config": {"amos_fallback": "false"}})
+    assert strict_false["amos_fallback"] is False
+    on = mod._read_lane_config(None, {"config": {"amos_fallback": True, "amos_base_url": "http://127.0.0.1:9/v1/systemone"}})
+    assert on["amos_fallback"] is True
+    assert on["amos_base_url"] == "http://127.0.0.1:9/v1/systemone"
+
+
+def test_amos_score_uses_config_base_url():
+    """The amos lane POSTs to the amos_base_url passed by config, not a frozen env constant."""
+    import src.turn_completion_nudge as mod
+
+    with patch(f"{MODULE}._post_json", return_value={"answers": {"q1": {"noul": 0.6}}}) as m_post:
+        score = mod._amos_score("req", "final", 0, False, "medium", 1, amos_base_url="http://127.0.0.1:9/v1/systemone")
+    assert score == 0.6
+    assert m_post.call_args[0][0] == "http://127.0.0.1:9/v1/systemone"
+
+
+def test_read_openrouter_key_env_fallback(monkeypatch):
+    """Without agent.secret_scope the declared env var is used (standalone path)."""
+    import src.turn_completion_nudge as mod
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    assert mod._read_openrouter_key() is None
+    monkeypatch.setenv("OPENROUTER_API_KEY", "env-key")
+    assert mod._read_openrouter_key() == "env-key"
+
+
+def test_secret_scope_key_preferred_over_env(monkeypatch):
+    """agent.secret_scope.get_secret wins over the env var (profile-scoped secrets)."""
+    import sys, types
+    import src.turn_completion_nudge as mod
+
+    pkg = types.ModuleType("agent")
+    sub = types.ModuleType("agent.secret_scope")
+    sub.get_secret = lambda name: {"OPENROUTER_API_KEY": "scope-key"}.get(name)
+    monkeypatch.setitem(sys.modules, "agent", pkg)
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", sub)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "env-key")
+    assert mod._read_openrouter_key() == "scope-key"
+
+
+def test_secret_scope_empty_value_falls_back_to_env(monkeypatch):
+    """A scope returning nothing must not blind the plugin to a present env key."""
+    import sys, types
+    import src.turn_completion_nudge as mod
+
+    pkg = types.ModuleType("agent")
+    sub = types.ModuleType("agent.secret_scope")
+    sub.get_secret = lambda name: None
+    monkeypatch.setitem(sys.modules, "agent", pkg)
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", sub)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "env-key")
+    assert mod._read_openrouter_key() == "env-key"
+
+
+def test_consecutive_nudge_capped_after_two_then_reset_by_new_user_turn():
+    """A chain of nudge-driven turns nudges at most _MAX_CONSECUTIVE_NUDGES times.
+
+    Uses ONE persistent handler (as production does: one instance built at
+    register time), since the chain depth lives on the instance.
+    """
+    import src.turn_completion_nudge as mod
+
+    ctx, injected = _make_ctx()
+    import logging, io
+    stream = io.StringIO()
+    handler_log = logging.StreamHandler(stream)
+    mod.logger.addHandler(handler_log)
+    old_level = mod.logger.level
+    mod.logger.setLevel(logging.INFO)  # pytest root WARNING otherwise swallows the cap INFO line
+    handler = TurnCompletionNudge(ctx)
+    try:
+        with patch(f"{MODULE}._jev_score", return_value=0.1):
+            handler.post_llm_call(
+                tier="full",
+                final_message="I will do next step",
+                user_request="real user turn",
+                config={"send_turn_text": True, "enabled": True},
+            )  # nudge #1 (chain starts)
+            handler.post_llm_call(
+                tier="full",
+                final_message="I will do next step",
+                user_request=mod._NUDGE_MESSAGE,
+                config={"send_turn_text": True, "enabled": True},
+            )  # nudge #2 (chain hop 1)
+            handler.post_llm_call(
+                tier="full",
+                final_message="I will do next step",
+                user_request=mod._NUDGE_MESSAGE,
+                config={"send_turn_text": True, "enabled": True},
+            )  # blocked (cap reached)
+    finally:
+        mod.logger.removeHandler(handler_log)
+        mod.logger.setLevel(old_level)
+    assert len([m for m in injected if m == mod._NUDGE_MESSAGE]) == 2
+    assert mod._METRICS.snapshot()["buckets"]["nudge_injected"] == 2
+    assert "consecutive-nudge cap" in stream.getvalue()
+
+
+def test_consecutive_nudge_reset_on_new_user_turn_and_on_complete(monkeypatch):
+    """Chain depth resets when a real user turn arrives or a turn scores complete.
+
+    One persistent handler (production shape) — otherwise depth would reset
+    spuriously per call and this would pass vacuously.
+    """
+    import src.turn_completion_nudge as mod
+
+    ctx, injected = _make_ctx()
+    handler = TurnCompletionNudge(ctx)
+    with patch(f"{MODULE}._jev_score", return_value=0.1):
+        handler.post_llm_call(tier="full", final_message="mid", user_request="u1",
+              config={"send_turn_text": True, "enabled": True})  # nudge, depth 1
+        handler.post_llm_call(tier="full", final_message="mid", user_request=mod._NUDGE_MESSAGE,
+              config={"send_turn_text": True, "enabled": True})  # chain hop, depth 2
+    with patch(f"{MODULE}._jev_score", return_value=0.9):
+        handler.post_llm_call(tier="full", final_message="complete turn", user_request="u2",
+              config={"send_turn_text": True, "enabled": True})  # complete -> depth 0
+    with patch(f"{MODULE}._jev_score", return_value=0.1):
+        handler.post_llm_call(tier="full", final_message="mid", user_request=mod._NUDGE_MESSAGE,
+              config={"send_turn_text": True, "enabled": True})  # allowed again (depth reset)
+    assert mod._METRICS.snapshot()["buckets"]["nudge_injected"] == 3
