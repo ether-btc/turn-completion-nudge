@@ -1,12 +1,12 @@
 name: turn-completion-nudge
-version: "0.3.1"
+version: "0.3.2"
 description: "Nudges the agent to continue when a turn ends prematurely (planning or announcing next steps it has not done). Fail-open: never blocks a turn."
 author: "ether-btc"
 kind: standalone
 requires_hermes: ">=0.21.3"
 requires_env:
   - name: OPENROUTER_API_KEY
-    description: "OpenRouter API key for the configured scorer lane (OpenRouter decisions API, https://openrouter.ai/api/alpha/decisions). Read via the Hermes secret scope when available (profile-scoped secrets), else the declared env var — never .env. Optional — when unset or a template/placeholder value, the plugin fails open (no further egress) and, with amos_fallback: true, may use the keyless Amos systemone fallback (a separate opt-in)."
+    description: "OpenRouter API key for the configured scorer lane (OpenRouter decisions API, https://openrouter.ai/api/alpha/decisions). Read via the Hermes secret scope; the scope's answer is used as-is (a multi-profile refusal is never bypassed via env, so one profile's traffic is never billed to another profile's key). The declared env var is read only on Hermes builds without the secret scope. Optional — when unset or a template/placeholder value, the plugin fails open (no further egress) and, with amos_fallback: true, may use the keyless Amos systemone fallback (a separate opt-in)."
     secret: true
 provides_hooks:
   - post_llm_call

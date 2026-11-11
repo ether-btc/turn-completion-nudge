@@ -884,8 +884,13 @@ def test_secret_scope_key_preferred_over_env(monkeypatch):
     assert mod._read_openrouter_key() == "scope-key"
 
 
-def test_secret_scope_empty_value_falls_back_to_env(monkeypatch):
-    """A scope returning nothing must not blind the plugin to a present env key."""
+def test_secret_scope_empty_value_returned_as_is(monkeypatch):
+    """A scope refusal (None) is returned as-is — never bypassed via env re-read.
+
+    get_secret refuses only when one process serves several profiles and this
+    profile has no key of its own; re-reading the env there would bill the
+    launch profile's key for this profile's traffic (upstream review round 2).
+    """
     import sys, types
     import src.turn_completion_nudge as mod
 
@@ -895,7 +900,26 @@ def test_secret_scope_empty_value_falls_back_to_env(monkeypatch):
     monkeypatch.setitem(sys.modules, "agent", pkg)
     monkeypatch.setitem(sys.modules, "agent.secret_scope", sub)
     monkeypatch.setenv("OPENROUTER_API_KEY", "env-key")
-    assert mod._read_openrouter_key() == "env-key"
+    assert mod._read_openrouter_key() is None
+
+
+def test_secret_scope_error_propagates_no_env_fallback(monkeypatch):
+    """get_secret failures are not swallowed into an env re-read (as-is contract)."""
+    import sys, types
+    import src.turn_completion_nudge as mod
+
+    pkg = types.ModuleType("agent")
+    sub = types.ModuleType("agent.secret_scope")
+
+    def _boom(name):
+        raise RuntimeError("scope backend down")
+
+    sub.get_secret = _boom
+    monkeypatch.setitem(sys.modules, "agent", pkg)
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", sub)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "env-key")
+    with pytest.raises(RuntimeError):
+        mod._read_openrouter_key()
 
 
 def test_consecutive_nudge_capped_after_two_then_reset_by_new_user_turn():

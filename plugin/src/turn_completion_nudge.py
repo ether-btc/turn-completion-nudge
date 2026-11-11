@@ -49,23 +49,21 @@ _PLACEHOLDER_KEY_WARNED = False
 
 
 def _read_openrouter_key() -> str | None:
-    """Read the OpenRouter key, preferring the Hermes secret scope.
+    """Read the OpenRouter key via the Hermes secret scope, answer as-is.
 
-    Profile-scoped secrets live in the secret scope in multi-profile gateways;
-    a bare env read misses those. Fall back to the plain env var when the
-    scope is unavailable (standalone installs) or yields nothing.
+    get_secret already reads the declared env var on single-profile installs;
+    it returns None only when one process serves several profiles and this
+    profile has no key of its own. That refusal is load-bearing: re-reading
+    the process env here would hand the turn the launch profile's key, which
+    then gets used and billed on this profile's traffic. So the scope's
+    answer is returned exactly as given — the only fallback is for Hermes
+    builds that lack agent.secret_scope entirely (ImportError).
     """
     try:
         from agent.secret_scope import get_secret  # type: ignore[import-not-found]
-    except Exception:
+    except ImportError:
         return os.environ.get("OPENROUTER_API_KEY")
-    try:
-        value = get_secret("OPENROUTER_API_KEY")
-    except Exception:
-        return os.environ.get("OPENROUTER_API_KEY")
-    if isinstance(value, str) and value.strip():
-        return value
-    return os.environ.get("OPENROUTER_API_KEY")
+    return get_secret("OPENROUTER_API_KEY")
 
 
 def _validate_openrouter_api_key(api_key: str | None) -> str | None:
