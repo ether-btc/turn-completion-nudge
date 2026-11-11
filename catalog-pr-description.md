@@ -2,7 +2,7 @@
 
 ## What this PR adds
 
-One file: `plugin-catalog/turn-completion-nudge.yaml` — a NousResearch/hermes-agent plugin catalog entry for `ether-btc/turn-completion-nudge`, pinned to commit `fc2f52707a60fb8f2c86b7d8dee1d08765daca58` (version 0.3.1), `subdir: plugin`. Entry shape mirrors `plugin-catalog/ram-first-context.yaml` (fields: name, repo, sha, subdir, description, maintainer, tier, category, requires_hermes, version, known_issues, capabilities).
+One file: `plugin-catalog/turn-completion-nudge.yaml` — a NousResearch/hermes-agent plugin catalog entry for `ether-btc/turn-completion-nudge`, pinned to commit `3453efe28689f3855eb9865e9033f8823a0961e2` (version 0.3.2), `subdir: plugin`. Entry shape mirrors `plugin-catalog/ram-first-context.yaml` (fields: name, repo, sha, subdir, description, maintainer, tier, category, requires_hermes, version, known_issues, capabilities).
 
 ## What the plugin does
 
@@ -18,7 +18,7 @@ Status command: `hermes turn-completion-nudge status` (enabled, opted-in, thresh
 
 ## Pin
 
-- sha: `fc2f52707a60fb8f2c86b7d8dee1d08765daca58` (full 40-hex; the repo is live at the pinned URL; default branch `main` carries only owner-bookkeeping commits after the pin — `git diff fc2f527..main -- plugin/` is empty by convention, and the convention is documented in the repo)
+- sha: `3453efe28689f3855eb9865e9033f8823a0961e2` (full 40-hex; the repo is live at the pinned URL; default branch `main` carries only owner-bookkeeping commits after the pin — `git diff 3453efe2..main -- plugin/` is empty by convention, and the convention is documented in the repo)
 
 ## Tree state since the independent review (GO verdict, three conditionals — all closed)
 
@@ -30,7 +30,9 @@ Landed since the WP-6 review, all below or at the pin plus owner bookkeeping:
 - `14b1427`/`48c810b`/`6829483` SHA re-pin, catalog-yaml sync to this PR's filed shape, CI-workflow fix (setup-python + pytest install), and PR-description sync — all owner bookkeeping
 - **`fc2f527` upstream-review round (2026-11-10, addressing teknium1's CHANGES_REQUESTED):** OpenRouter key read via `agent.secret_scope.get_secret` with env fallback (blocking item); `amos_fallback` second opt-in (default false — no silent second service); consecutive-nudge cap (2) with chain reset on a real user turn or a complete turn; `PYTEST_CURRENT_TEST` branch removed entirely — one default path (absent → dormant everywhere), config passed explicitly in tests; `HERMES_AMOS_BASE_URL` moved from `optional_env` to `config_schema` (`amos_base_url`); version 0.3.1
 
-Verification at the pinned commit: `hermes plugins validate` 15/15 checks pass; `pytest` **64 passed**; independent senior review verdict GO (its three conditional fixes are the WP-r2 wave above).
+- **`3453efe2` upstream-review round 2 (2026-11-11, addressing teknium1's second CHANGES_REQUESTED):** `_read_openrouter_key` returns `get_secret(...)` exactly as given — bare `except Exception` and empty-value `os.environ` fallbacks removed (they re-opened the multi-profile case where the launch profile's key gets used and billed); only an `ImportError` fallback remains for Hermes builds without `agent.secret_scope`; tests rewritten to the as-is contract (scope refusal → None even with env set; scope errors propagate, not swallowed); version 0.3.2; live install re-synced byte-identical
+
+Verification at the pinned commit: `hermes plugins validate` 15/15 checks pass; `pytest` **65 passed**; independent senior review verdict GO (its three conditional fixes are the WP-r2 wave above).
 
 ## Rule 13 disclosures (risky behaviour)
 
