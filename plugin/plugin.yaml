@@ -1,5 +1,5 @@
 name: turn-completion-nudge
-version: "0.3.2"
+version: "0.3.3"
 description: "Nudges the agent to continue when a turn ends prematurely (planning or announcing next steps it has not done). Fail-open: never blocks a turn."
 author: "ether-btc"
 kind: standalone

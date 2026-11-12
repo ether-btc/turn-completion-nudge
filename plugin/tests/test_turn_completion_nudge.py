@@ -36,6 +36,16 @@ def reset_state():
     mod._LAST_LANE_CONFIG = {}
     mod._PLACEHOLDER_KEY_WARNED = False
     yield
+    # Fail-open unlink of persisted state so persistence does not leak between tests.
+    try:
+        path = mod._state_path()
+        if os.path.exists(path):
+            os.remove(path)
+        state_dir = os.path.dirname(path)
+        if os.path.isdir(state_dir) and not os.listdir(state_dir):
+            os.rmdir(state_dir)
+    except Exception:
+        pass
 
 
 def _mock_response(payload):
@@ -988,3 +998,96 @@ def test_consecutive_nudge_reset_on_new_user_turn_and_on_complete(monkeypatch):
         handler.post_llm_call(tier="full", final_message="mid", user_request=mod._NUDGE_MESSAGE,
               config={"send_turn_text": True, "enabled": True})  # allowed again (depth reset)
     assert mod._METRICS.snapshot()["buckets"]["nudge_injected"] == 3
+
+
+# ---------- metrics persistence ----------
+
+
+def test_metrics_persist_round_trip(tmp_path, monkeypatch):
+    import src.turn_completion_nudge as mod
+
+    state_file = tmp_path / "state" / "metrics.json"
+    monkeypatch.setattr(mod, "_state_path", lambda: str(state_file))
+
+    m1 = Metrics()
+    m1.record("scored")
+    m1.record("nudge_injected")
+    m1.record("no_nudge")
+
+    m2 = Metrics()
+    assert m2.snapshot()["total_calls"] == m1.snapshot()["total_calls"]
+    assert m2.snapshot()["buckets"] == m1.snapshot()["buckets"]
+    assert m2.snapshot()["invariant_ok"] == m1.snapshot()["invariant_ok"]
+    assert m2.snapshot()["invariant_ok"] is True
+
+    loaded = mod._load_persisted_snapshot()
+    assert loaded is not None
+    assert loaded["total_calls"] == m1.snapshot()["total_calls"]
+    assert loaded["buckets"] == m1.snapshot()["buckets"]
+    assert loaded["invariant_ok"] is True
+
+
+def test_metrics_corrupt_json_fallback(tmp_path, monkeypatch):
+    import src.turn_completion_nudge as mod
+
+    state_file = tmp_path / "state" / "metrics.json"
+    monkeypatch.setattr(mod, "_state_path", lambda: str(state_file))
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text("{not valid json", encoding="utf-8")
+
+    # Loading must not raise and must fall back (None).
+    assert mod._load_persisted_snapshot() is None
+
+    # Constructing Metrics must not raise and starts from zeros.
+    m = Metrics()
+    snap = m.snapshot()
+    assert snap["total_calls"] == 0
+    assert all(v == 0 for v in snap["buckets"].values())
+    assert snap["invariant_ok"] is True
+
+    # record() still works.
+    m.record("skipped")
+    assert m.snapshot()["total_calls"] == 1
+
+    # status-cli-equivalent load falls back to process snapshot, source: process.
+    # m.record() persisted a valid snapshot; restore corrupt file to force fallback.
+    state_file.write_text("{not valid json", encoding="utf-8")
+    class Args:
+        json = True
+
+    from io import StringIO
+    import sys
+
+    buf = StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        mod._status_cli(Args())
+    finally:
+        sys.stdout = old
+    out = json.loads(buf.getvalue())
+    assert out["source"] == "process"
+    assert out["total_calls"] == 0
+    assert out["invariant_ok"] is True
+
+
+def test_metrics_write_failure_record_ok(tmp_path, monkeypatch):
+    import src.turn_completion_nudge as mod
+
+    state_file = tmp_path / "state" / "metrics.json"
+    monkeypatch.setattr(mod, "_state_path", lambda: str(state_file))
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", boom)
+
+    m = Metrics()
+    # Should not raise despite persistence failure.
+    m.record("error")
+
+    snap = m.snapshot()
+    assert snap["total_calls"] == 1
+    assert snap["buckets"]["error"] == 1
+    assert snap["invariant_ok"] is True
+    assert mod.check_metrics_invariant(m) is True

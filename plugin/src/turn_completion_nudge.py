@@ -5,9 +5,11 @@ Hook registration for post_llm_call; fail-open behavior throughout; metrics for 
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
+import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -43,6 +45,82 @@ _DEFAULT_TIMEOUT_S = 4
 _SERVED_MODEL: str | None = None
 # Last lane config read live in this process (process-local).
 _LAST_LANE_CONFIG: dict[str, Any] = {}
+
+
+def _state_path() -> str:
+    """Return the metrics state file path inside the plugin directory (resolved at call time)."""
+    plugin_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(plugin_dir, "state", "metrics.json")
+
+
+def _is_nonneg_int_not_bool(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _load_persisted_snapshot(path: str | None = None) -> dict[str, Any] | None:
+    """Load and validate a persisted metrics snapshot; None on missing/invalid (fail-open)."""
+    if path is None:
+        path = _state_path()
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return None
+        total_calls = data.get("total_calls")
+        buckets = data.get("buckets")
+        if not _is_nonneg_int_not_bool(total_calls):
+            return None
+        if not isinstance(buckets, dict):
+            return None
+        for k, v in buckets.items():
+            if not isinstance(k, str) or not _is_nonneg_int_not_bool(v):
+                return None
+        total = sum(buckets.values())
+        if total_calls != total:
+            return None
+        # Recompute the invariant from the persisted numbers; never trust the file's own flag.
+        invariant_ok = (total_calls == total)
+        last_updated = data.get("last_updated")
+        if not isinstance(last_updated, str):
+            last_updated = ""
+        return {
+            "total_calls": total_calls,
+            "buckets": dict(buckets),
+            "invariant_ok": invariant_ok,
+            "last_updated": last_updated,
+        }
+    except (OSError, ValueError, TypeError) as exc:  # fail-open
+        logger.debug("turn-completion-nudge: failed to load persisted metrics: %s", exc)
+        return None
+
+
+def _persist_snapshot(snapshot: dict[str, Any]) -> None:
+    """Persist a metrics snapshot atomically to state/metrics.json (fail-open)."""
+    path = _state_path()
+    try:
+        state_dir = os.path.dirname(path)
+        os.makedirs(state_dir, exist_ok=True)
+        payload = {
+            "total_calls": int(snapshot.get("total_calls", 0)),
+            "buckets": dict(snapshot.get("buckets", {})),
+            "invariant_ok": bool(snapshot.get("invariant_ok", False)),
+            "last_updated": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        fd, tmp = tempfile.mkstemp(dir=state_dir, prefix=".metrics.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, separators=(",", ":"), sort_keys=True)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+    except (OSError, TypeError, ValueError) as exc:  # fail-open; never raised into hook
+        logger.debug("turn-completion-nudge: failed to persist metrics: %s", exc)
 
 _PLACEHOLDER_KEY_FRAGMENTS = ("replace", "your-", "your_", "changeme", "change-me", "test-key", "placeholder", "insert", "sk-or-...")
 _PLACEHOLDER_KEY_WARNED = False
@@ -102,6 +180,28 @@ class Metrics:
             "lane_failed": 0,
         }
         self._recent_scores: "deque[float]" = deque(maxlen=5)
+        # Load persisted snapshot into this instance (fail-open).
+        try:
+            loaded = _load_persisted_snapshot()
+            if loaded is not None:
+                self._total_calls = loaded["total_calls"]
+                # Keep known buckets and merge any persisted extras.
+                merged = dict(self._buckets)
+                merged.update(loaded["buckets"])
+                self._buckets = merged
+        except (OSError, ValueError, TypeError):  # fail-open
+            self._total_calls = 0
+            self._buckets = {
+                "skipped": 0,
+                "scored": 0,
+                "nudge_injected": 0,
+                "no_nudge": 0,
+                "error": 0,
+                "dormant": 0,
+                "lane_openrouter": 0,
+                "lane_amos": 0,
+                "lane_failed": 0,
+            }
 
     def _assert_invariant(self) -> None:
         total = sum(self._buckets.values())
@@ -119,6 +219,13 @@ class Metrics:
             self._total_calls += 1
             self._buckets[outcome] = self._buckets.get(outcome, 0) + 1
             self._assert_invariant()
+            snap = {
+                "total_calls": self._total_calls,
+                "buckets": dict(self._buckets),
+                "invariant_ok": True,
+            }
+        # Persist AFTER the invariant assertion; _persist_snapshot is fail-open by contract.
+        _persist_snapshot(snap)
 
     def record_score(self, score: Any) -> None:
         """Record a recent score (process-local, capped at 5)."""
@@ -760,10 +867,30 @@ def _setup_status_cli(subparser):
 
 
 def _status_cli(args):
-    """Print the turn-completion-nudge status (process-local)."""
+    """Print the turn-completion-nudge status (counters persisted; lane config process-local)."""
     import json as _json
 
-    snap = _METRICS.snapshot()
+    path = _state_path()
+    loaded = _load_persisted_snapshot(path)
+    if loaded is not None:
+        source = "persisted"
+        total_calls = loaded["total_calls"]
+        buckets = dict(loaded["buckets"])
+        invariant_ok = (total_calls == sum(buckets.values()))
+        try:
+            last_updated = datetime.datetime.fromtimestamp(
+                os.path.getmtime(path), tz=datetime.timezone.utc
+            ).isoformat()
+        except Exception:  # noqa: BLE001
+            last_updated = loaded.get("last_updated") or ""
+    else:
+        source = "process"
+        proc = _METRICS.snapshot()
+        total_calls = proc.get("total_calls", 0)
+        buckets = dict(proc.get("buckets", {}))
+        invariant_ok = (total_calls == sum(buckets.values()))
+        last_updated = ""
+
     cfg = dict(_LAST_LANE_CONFIG) or {
         "enabled": True,
         "send_turn_text": False,
@@ -772,24 +899,27 @@ def _status_cli(args):
         "amos_model": _DEFAULT_AMOS_MODEL,
         "timeout_s": _DEFAULT_TIMEOUT_S,
     }
+    proc_snap = _METRICS.snapshot()
     out = {
         "command": "turn-completion-nudge status",
         "process_local": True,
+        "source": source,
+        "last_updated": last_updated,
         "enabled": cfg.get("enabled", True),
         "opted_in": bool(cfg.get("send_turn_text", False)),
         "threshold": cfg.get("threshold", _DEFAULT_THRESHOLD),
         "scorer_model": cfg.get("scorer_model"),
         "amos_model": cfg.get("amos_model"),
         "timeout_s": cfg.get("timeout_s"),
-        "last_scores": list(snap.get("recent_scores", [])),
-        "buckets": snap.get("buckets", {}),
-        "total_calls": snap.get("total_calls", 0),
-        "invariant_ok": snap.get("invariant_ok", False),
+        "last_scores": list(proc_snap.get("recent_scores", [])),
+        "buckets": buckets,
+        "total_calls": total_calls,
+        "invariant_ok": invariant_ok,
     }
     if getattr(args, "json", False):
         print(_json.dumps(out, indent=2))
     else:
-        print("turn-completion-nudge status (process-local):")
+        print(f"turn-completion-nudge status (counters: {source}; lane config: process-local):")
         print(f"  enabled: {out['enabled']}")
         print(f"  opted_in (send_turn_text): {out['opted_in']}")
         print(f"  threshold: {out['threshold']}")
@@ -800,6 +930,8 @@ def _status_cli(args):
         print(f"  buckets: {out['buckets']}")
         print(f"  total_calls: {out['total_calls']}")
         print(f"  invariant_ok: {out['invariant_ok']}")
+        print(f"  source: {out['source']}")
+        print(f"  last_updated: {out['last_updated']}")
 
 
 def register(ctx: Any) -> None:

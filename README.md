@@ -16,11 +16,11 @@ Hermes plugin: nudges the agent to continue when a turn ends prematurely (planni
 A standalone Hermes plugin (`kind: standalone`, `requires_hermes: >=0.21.3`) that scores each completed turn and, when the turn looks incomplete, injects a one-off continuation nudge.
 
 - Hooks: `post_llm_call` (fail-open — scoring or network problems never block a turn)
-- Commands: `hermes turn-completion-nudge status` (process-local: enabled/opted-in/threshold/last-5-scores/bucket counts)
+- Commands: `hermes turn-completion-nudge status` (persisted counts readable from a separate process: enabled/opted-in/threshold/last-5-scores/bucket counts, source/last_updated)
 - Scorer lane ladder: OpenRouter decisions lane first (`scorer_model`, key from `OPENROUTER_API_KEY`); the keyless Amos systemone fallback is a **separate opt-in** (`amos_fallback`, default off — OpenRouter failure without it records `lane_failed` and stops, no second third-party egress); buckets `lane_openrouter` / `lane_amos` / `lane_failed` / `dormant`; served model logged per call
 - Privacy: `send_turn_text` defaults to false — dormant by default, no scoring calls, no egress
 - Nudge hygiene: bounded per-turn guard (cap 1024, drop-oldest) plus a consecutive-nudge cap of 2 (nudge-driven turns are recognized by the injected text and the chain stops after two hops)
-- Resource hygiene: bounded per-turn guard (cap 1024, drop-oldest), in-process counters only, zero writes outside the plugin directory
+- Resource hygiene: bounded per-turn guard (cap 1024, drop-oldest), persisted counters inside the plugin directory (`state/metrics.json`), zero writes outside the plugin directory
 - Hardware fitness: pure stdlib (`urllib`, `json`, `threading`); measured Pi5 round-trips under 5 s — see `docs/pi5_evidence.json`
 
 ## Install
