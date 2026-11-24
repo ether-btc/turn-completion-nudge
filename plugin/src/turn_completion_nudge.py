@@ -574,7 +574,9 @@ def _validate_threshold(value: Any) -> float:
     """Accept only finite numeric threshold in [0,1]; reject bool/NaN/out-of-range.
 
     Invalid values warn and fall back to the documented safe default. No silent
-    clamping: out-of-range finite values are rejected.
+    clamping: out-of-range finite values are rejected. Conversion failures
+    (e.g. OverflowError for huge Python ints) are caught here, not left to the
+    hook's outer exception handler.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         logger.warning(
@@ -583,7 +585,15 @@ def _validate_threshold(value: Any) -> float:
             _DEFAULT_THRESHOLD,
         )
         return _DEFAULT_THRESHOLD
-    threshold = float(value)
+    try:
+        threshold = float(value)
+    except (OverflowError, TypeError, ValueError):
+        logger.warning(
+            "turn-completion-nudge: invalid threshold %r; using default %s",
+            value,
+            _DEFAULT_THRESHOLD,
+        )
+        return _DEFAULT_THRESHOLD
     if not (threshold == threshold and threshold >= 0.0 and threshold <= 1.0):  # NaN/inf/range
         logger.warning(
             "turn-completion-nudge: invalid threshold %r; using default %s",
@@ -597,14 +607,20 @@ def _validate_threshold(value: Any) -> float:
 def _validate_timeout_s(value: Any) -> int:
     """Accept only positive integer timeout_s; reject bool/float/non-integral/<=0.
 
-    Invalid values warn and fall back to the documented safe default.
+    Invalid values warn and fall back to the documented safe default. String
+    parsing accepts ASCII digits only and catches int() failures (superscript
+    digits like "²" and Python's 4300-digit int-conversion limit would otherwise
+    raise past this validator).
     """
     if isinstance(value, bool) or not isinstance(value, int):
-        # Accept integral numeric strings only if they are strict integer forms.
+        # Accept integral numeric strings only if they are strict decimal forms.
         if isinstance(value, str):
             text = value.strip()
-            if text.isdigit():
-                parsed = int(text)
+            if text.isascii() and text.isdigit():
+                try:
+                    parsed = int(text)
+                except (ValueError, OverflowError):
+                    parsed = 0
                 if parsed > 0:
                     return parsed
         logger.warning(
@@ -1189,7 +1205,7 @@ def register(ctx: Any) -> None:
             help="turn-completion-nudge plugin status and metrics",
             setup_fn=_setup_status_cli,
             handler_fn=_status_cli,
-            description="Show turn-completion-nudge lane config and in-process metrics.",
+            description="Show turn-completion-nudge lane config, persisted counters, and process-local lane state.",
         )
     except Exception:
         logger.warning("turn-completion-nudge: register failed", exc_info=True)

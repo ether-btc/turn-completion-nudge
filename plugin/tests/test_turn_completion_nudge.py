@@ -1275,19 +1275,44 @@ def test_v1_to_v2_migration_preserves_legacy_events_no_fabricated_calls(tmp_path
 def test_invalid_threshold_and_timeout_fallback_warn_and_default(caplog):
     import src.turn_completion_nudge as mod
 
-    bad_thresholds = [float("nan"), float("inf"), -0.1, 1.1, True, False, "0.5", "bad"]
+    bad_thresholds = [
+        float("nan"),
+        float("inf"),
+        -0.1,
+        1.1,
+        True,
+        False,
+        "0.5",
+        "bad",
+        10**400,  # float() raises OverflowError; must be caught by the validator
+    ]
     for bad in bad_thresholds:
+        caplog.clear()
         with caplog.at_level(logging.WARNING):
             cfg = mod._read_lane_config(None, {"config": {"threshold": bad, "timeout_s": 4}})
         assert cfg["threshold"] == 0.2, bad
         assert cfg["timeout_s"] == 4
+        assert any("invalid threshold" in rec.message for rec in caplog.records), bad
 
-    bad_timeouts = [0, -1, True, False, 1.5, "4.0", "abc", None]
+    bad_timeouts = [
+        0,
+        -1,
+        True,
+        False,
+        1.5,
+        "4.0",
+        "abc",
+        None,
+        "\u00b2",  # superscript digit: isdigit() True but int() raises ValueError
+        "9" * 5000,  # past Python's int-string conversion limit (ValueError)
+    ]
     for bad in bad_timeouts:
+        caplog.clear()
         with caplog.at_level(logging.WARNING):
             cfg = mod._read_lane_config(None, {"config": {"threshold": 0.2, "timeout_s": bad}})
         assert cfg["timeout_s"] == 4, bad
         assert cfg["threshold"] == 0.2
+        assert any("invalid timeout_s" in rec.message for rec in caplog.records), bad
 
     # valid edge cases
     assert mod._read_lane_config(None, {"config": {"threshold": 0.0}})["threshold"] == 0.0
@@ -1324,10 +1349,13 @@ def test_invalid_config_values_fail_open_no_egress():
 
 
 def test_forced_out_of_order_concurrent_writes_final_persisted_matches_memory(tmp_path, monkeypatch):
-    """Deterministic race: force older snapshot commit attempt after newer commit.
+    """Deterministic race: older snapshot passes its early check, newer commits, then older resumes.
 
-    Final persisted snapshot must equal the in-memory state despite out-of-order
-    writer scheduling. Asserts persisted JSON fields and schema, not only return values.
+    The older writer is stalled INSIDE _persist_snapshot after the early stale-sequence
+    check (at os.fsync, before the final _PERSIST_LOCK commit). Removing the final
+    in-lock generation check makes this test fail: the stale snapshot then replaces
+    the newer persisted file. Asserts persisted JSON fields and schema, not only
+    return values.
     """
     import src.turn_completion_nudge as mod
 
@@ -1336,40 +1364,38 @@ def test_forced_out_of_order_concurrent_writes_final_persisted_matches_memory(tm
     monkeypatch.setattr(mod, "_LAST_PERSISTED_SEQ", 0)
 
     m = Metrics()
-    real_persist = mod._persist_snapshot
-    first_before_commit = threading.Event()
-    allow_first_commit = threading.Event()
-    second_committed = threading.Event()
-    state = {"first_seen": False}
+    real_fsync = os.fsync
+    older_past_early_check = threading.Event()
+    allow_older_commit = threading.Event()
+    state = {"blocked": False, "timed_out": False}
 
-    def wrapped_persist(snapshot):
-        seq = int(snapshot.get("snapshot_seq", 0))
-        if seq == 1 and not state["first_seen"]:
-            state["first_seen"] = True
-            first_before_commit.set()
-            assert allow_first_commit.wait(timeout=5)
-        real_persist(snapshot)
-        if seq == 2:
-            second_committed.set()
+    def wrapped_fsync(fd):
+        if threading.current_thread().name == "older-writer" and not state["blocked"]:
+            state["blocked"] = True
+            older_past_early_check.set()
+            if not allow_older_commit.wait(timeout=5):
+                state["timed_out"] = True
+                raise AssertionError("older writer was never released")
+        return real_fsync(fd)
 
-    monkeypatch.setattr(mod, "_persist_snapshot", wrapped_persist)
+    monkeypatch.setattr(mod.os, "fsync", wrapped_fsync)
 
-    # seq1: older writer starts, pauses before commit.
+    # seq1: older writer passes its early check, then stalls at fsync.
     t1 = threading.Thread(target=lambda: m.record("skipped"), name="older-writer")
     t1.start()
-    assert first_before_commit.wait(timeout=5)
+    assert older_past_early_check.wait(timeout=5)
 
-    # seq2: newer writer commits while older is paused.
+    # seq2: newer writer commits fully while the older writer is stalled.
     t2 = threading.Thread(target=lambda: m.record("scored"), name="newer-writer")
     t2.start()
-    assert second_committed.wait(timeout=5)
-
-    # Allow older writer to attempt commit; seq guard must reject it.
-    allow_first_commit.set()
-    t1.join(timeout=5)
     t2.join(timeout=5)
-    assert not t1.is_alive()
     assert not t2.is_alive()
+
+    # Allow older writer to attempt commit; the commit-time seq guard must reject it.
+    allow_older_commit.set()
+    t1.join(timeout=5)
+    assert not t1.is_alive()
+    assert not state["timed_out"]
 
     snap = m.snapshot()
     assert snap["metric_events"] == 2
