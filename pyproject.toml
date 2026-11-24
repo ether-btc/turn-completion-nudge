@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "turn-completion-nudge"
-version = "0.3.0"
+version = "0.3.4"
 description = "Hermes plugin: nudges the agent to continue when a turn ends prematurely (planning or announcing next steps it has not done). Fail-open — never blocks a turn. Pure stdlib."
 requires-python = ">=3.9"
 dependencies = []

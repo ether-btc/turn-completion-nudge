@@ -26,10 +26,20 @@ MODULE = "src.turn_completion_nudge"
 
 
 @pytest.fixture(autouse=True)
-def reset_state():
+def reset_state(tmp_path, monkeypatch):
     import src.turn_completion_nudge as mod
 
+    # Isolate persisted metrics per test to avoid cross-test pollution and to make
+    # schema/persistence assertions deterministic.
+    state_file = tmp_path / "state" / "metrics.json"
+    monkeypatch.setattr(mod, "_state_path", lambda: str(state_file))
+    monkeypatch.setattr(mod, "_LAST_PERSISTED_SEQ", 0)
     mod._METRICS._total_calls = 0
+    mod._METRICS._metric_events = 0
+    mod._METRICS._legacy_metric_events = 0
+    mod._METRICS._count_scope = mod._HOOK_CALL_SCOPE_V2
+    mod._METRICS._count_epoch = "v2"
+    mod._METRICS._snapshot_seq = 0
     mod._METRICS._buckets = {k: 0 for k in mod._METRICS._buckets}
     mod._METRICS._recent_scores.clear()
     mod._SERVED_MODEL = None
@@ -315,7 +325,8 @@ def test_metrics_invariant_all_buckets():
         m.record(bucket)
     assert check_metrics_invariant(m) is True
     snap = m.snapshot()
-    assert snap["total_calls"] == 5
+    assert snap["metric_events"] == 5
+    assert snap["total_calls"] == 0  # hook-call counter is separate v2 scope
     assert snap["invariant_ok"] is True
 
 
@@ -325,7 +336,8 @@ def test_metrics_lane_bucket_invariant():
         m.record(bucket)
     assert check_metrics_invariant(m) is True
     snap = m.snapshot()
-    assert snap["total_calls"] == 4
+    assert snap["metric_events"] == 4
+    assert snap["total_calls"] == 0
     assert snap["invariant_ok"] is True
 
 
@@ -721,7 +733,44 @@ def test_status_cli_output(capsys):
     assert "turn-completion-nudge status" in captured.out
     assert "process-local" in captured.out
     assert "opted_in (send_turn_text): True" in captured.out
-    assert "last_scores: [0.15]" in captured.out
+    assert "last_scores (process-local): [0.15]" in captured.out
+    assert "metric_events:" in captured.out
+    assert "legacy_metric_events:" in captured.out
+
+
+def test_status_cli_json_fields_and_scopes(capsys):
+    import src.turn_completion_nudge as mod
+
+    mod._LAST_LANE_CONFIG.update(
+        {
+            "enabled": True,
+            "send_turn_text": False,
+            "threshold": 0.2,
+            "scorer_model": "m:free",
+            "amos_model": "medium",
+            "timeout_s": 4,
+        }
+    )
+    mod._METRICS.record_score(0.33)
+    mod._METRICS.record("skipped")
+    mod._METRICS.record_hook_call()
+
+    class Args:
+        json = True
+
+    mod._status_cli(Args())
+    out = json.loads(capsys.readouterr().out)
+    assert out["schema_version"] == 2
+    assert out["lane_config_process_local"] is True
+    assert out["last_scores_scope"] == "process_local"
+    assert out["last_scores"] == [0.33]
+    assert out["total_calls"] == 1
+    assert out["total_calls_scope"] == "enabled_post_llm_call_invocations_v2"
+    assert out["total_calls_epoch"] == "v2"
+    assert out["metric_events"] == 1
+    assert out["legacy_metric_events"] == 0
+    assert out["invariant_ok"] is True
+    assert "process_local" not in out  # renamed to lane_config_process_local
 
 
 # ---------- placeholder key validation ----------
@@ -1010,21 +1059,28 @@ def test_metrics_persist_round_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "_state_path", lambda: str(state_file))
 
     m1 = Metrics()
+    m1.record_hook_call()
     m1.record("scored")
     m1.record("nudge_injected")
     m1.record("no_nudge")
 
     m2 = Metrics()
-    assert m2.snapshot()["total_calls"] == m1.snapshot()["total_calls"]
-    assert m2.snapshot()["buckets"] == m1.snapshot()["buckets"]
-    assert m2.snapshot()["invariant_ok"] == m1.snapshot()["invariant_ok"]
-    assert m2.snapshot()["invariant_ok"] is True
+    s1 = m1.snapshot()
+    s2 = m2.snapshot()
+    assert s2["total_calls"] == s1["total_calls"] == 1
+    assert s2["metric_events"] == s1["metric_events"] == 3
+    assert s2["buckets"] == s1["buckets"]
+    assert s2["invariant_ok"] is True
 
     loaded = mod._load_persisted_snapshot()
     assert loaded is not None
-    assert loaded["total_calls"] == m1.snapshot()["total_calls"]
-    assert loaded["buckets"] == m1.snapshot()["buckets"]
+    assert loaded["schema_version"] == 2
+    assert loaded["total_calls"] == 1
+    assert loaded["metric_events"] == 3
+    assert loaded["legacy_metric_events"] == 0
+    assert loaded["buckets"] == s1["buckets"]
     assert loaded["invariant_ok"] is True
+    assert loaded["count_scope"] == "enabled_post_llm_call_invocations_v2"
 
 
 def test_metrics_corrupt_json_fallback(tmp_path, monkeypatch):
@@ -1042,12 +1098,14 @@ def test_metrics_corrupt_json_fallback(tmp_path, monkeypatch):
     m = Metrics()
     snap = m.snapshot()
     assert snap["total_calls"] == 0
+    assert snap["metric_events"] == 0
     assert all(v == 0 for v in snap["buckets"].values())
     assert snap["invariant_ok"] is True
 
     # record() still works.
     m.record("skipped")
-    assert m.snapshot()["total_calls"] == 1
+    assert m.snapshot()["metric_events"] == 1
+    assert m.snapshot()["total_calls"] == 0
 
     # status-cli-equivalent load falls back to process snapshot, source: process.
     # m.record() persisted a valid snapshot; restore corrupt file to force fallback.
@@ -1068,6 +1126,7 @@ def test_metrics_corrupt_json_fallback(tmp_path, monkeypatch):
     out = json.loads(buf.getvalue())
     assert out["source"] == "process"
     assert out["total_calls"] == 0
+    assert out["metric_events"] == 0
     assert out["invariant_ok"] is True
 
 
@@ -1084,10 +1143,257 @@ def test_metrics_write_failure_record_ok(tmp_path, monkeypatch):
 
     m = Metrics()
     # Should not raise despite persistence failure.
+    m.record_hook_call()
     m.record("error")
 
     snap = m.snapshot()
     assert snap["total_calls"] == 1
+    assert snap["metric_events"] == 1
     assert snap["buckets"]["error"] == 1
     assert snap["invariant_ok"] is True
     assert mod.check_metrics_invariant(m) is True
+
+
+# ---------- required audit regression coverage ----------
+
+
+def _hook_kwargs(**overrides):
+    base = {
+        "tier": "full",
+        "final_message": "I will do next step",
+        "user_request": "do task",
+        "config": {"send_turn_text": True, "enabled": True},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_hook_call_accounting_success_skip_dormant_lane_failed_outer_error():
+    import src.turn_completion_nudge as mod
+
+    # success/nudge path (enabled hook call)
+    ctx, injected = _make_ctx()
+    with patch(f"{MODULE}._jev_score", return_value=0.1):
+        _call(ctx, **_hook_kwargs())
+    assert injected == [_NUDGE_MESSAGE]
+
+    # skip path
+    ctx2, _ = _make_ctx()
+    with patch(f"{MODULE}._jev_score") as mock_score:
+        _call(ctx2, **_hook_kwargs(tier="light"))
+    mock_score.assert_not_called()
+
+    # dormant path
+    ctx3, _ = _make_ctx()
+    with patch(f"{MODULE}._jev_score") as mock_score:
+        _call(ctx3, **_hook_kwargs(config={"send_turn_text": False, "enabled": True}))
+    mock_score.assert_not_called()
+
+    # lane failure path (OpenRouter fails, no amos fallback)
+    ctx4, _ = _make_ctx()
+    with patch(f"{MODULE}._jev_score", side_effect=JevScoreError("boom")):
+        _call(ctx4, **_hook_kwargs(config={"send_turn_text": True, "enabled": True, "amos_fallback": False}))
+
+    # outer error path: force an unexpected exception inside hook after counting.
+    ctx5, _ = _make_ctx()
+    with patch(f"{MODULE}._read_lane_config", side_effect=RuntimeError("kaboom")):
+        result = _call(ctx5, **_hook_kwargs())
+    assert result is None
+
+    snap = mod._METRICS.snapshot()
+    assert snap["total_calls"] == 5
+    assert snap["buckets"]["lane_openrouter"] == 1
+    assert snap["buckets"]["nudge_injected"] == 1
+    assert snap["buckets"]["skipped"] == 1
+    assert snap["buckets"]["dormant"] == 1
+    assert snap["buckets"]["lane_failed"] == 1
+    assert snap["buckets"]["error"] == 1
+    assert snap["metric_events"] == 6
+    assert snap["invariant_ok"] is True
+
+    loaded = mod._load_persisted_snapshot()
+    assert loaded is not None
+    assert loaded["schema_version"] == 2
+    assert loaded["total_calls"] == 5
+    assert loaded["metric_events"] == 6
+    assert loaded["invariant_ok"] is True
+
+
+def test_disabled_hook_is_true_noop_not_counted():
+    import src.turn_completion_nudge as mod
+
+    ctx, injected = _make_ctx()
+    with patch(f"{MODULE}._jev_score") as mock_score:
+        result = _call(ctx, **_hook_kwargs(config={"enabled": False, "send_turn_text": True}))
+    assert result is None
+    assert injected == []
+    mock_score.assert_not_called()
+    snap = mod._METRICS.snapshot()
+    assert snap["total_calls"] == 0
+    assert snap["metric_events"] == 0
+    assert all(v == 0 for v in snap["buckets"].values())
+
+
+def test_v1_to_v2_migration_preserves_legacy_events_no_fabricated_calls(tmp_path, monkeypatch):
+    import src.turn_completion_nudge as mod
+
+    state_file = tmp_path / "state" / "metrics.json"
+    monkeypatch.setattr(mod, "_state_path", lambda: str(state_file))
+    monkeypatch.setattr(mod, "_LAST_PERSISTED_SEQ", 0)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    v1 = {
+        "total_calls": 7,
+        "buckets": {"skipped": 2, "scored": 0, "nudge_injected": 1, "no_nudge": 3, "error": 1},
+        "invariant_ok": True,
+        "last_updated": "2026-11-24T00:00:00+00:00",
+    }
+    state_file.write_text(json.dumps(v1), encoding="utf-8")
+
+    loaded = mod._load_persisted_snapshot()
+    assert loaded is not None
+    assert loaded["schema_version"] == 2
+    assert loaded["metric_events"] == 7
+    assert loaded["legacy_metric_events"] == 7
+    assert loaded["total_calls"] == 0
+    assert loaded["count_scope"] == "enabled_post_llm_call_invocations_v2"
+    assert loaded["count_epoch"] == "migrated_from_v1"
+    assert loaded["buckets"]["skipped"] == 2
+    assert loaded["buckets"]["nudge_injected"] == 1
+    assert loaded["buckets"]["no_nudge"] == 3
+    assert loaded["buckets"]["error"] == 1
+    assert loaded["invariant_ok"] is True
+
+    m = Metrics()
+    snap = m.snapshot()
+    assert snap["total_calls"] == 0  # no fabricated historical hook-call counts
+    assert snap["metric_events"] == 7
+    assert snap["legacy_metric_events"] == 7
+    assert snap["count_epoch"] == "migrated_from_v1"
+    assert snap["invariant_ok"] is True
+
+
+def test_invalid_threshold_and_timeout_fallback_warn_and_default(caplog):
+    import src.turn_completion_nudge as mod
+
+    bad_thresholds = [float("nan"), float("inf"), -0.1, 1.1, True, False, "0.5", "bad"]
+    for bad in bad_thresholds:
+        with caplog.at_level(logging.WARNING):
+            cfg = mod._read_lane_config(None, {"config": {"threshold": bad, "timeout_s": 4}})
+        assert cfg["threshold"] == 0.2, bad
+        assert cfg["timeout_s"] == 4
+
+    bad_timeouts = [0, -1, True, False, 1.5, "4.0", "abc", None]
+    for bad in bad_timeouts:
+        with caplog.at_level(logging.WARNING):
+            cfg = mod._read_lane_config(None, {"config": {"threshold": 0.2, "timeout_s": bad}})
+        assert cfg["timeout_s"] == 4, bad
+        assert cfg["threshold"] == 0.2
+
+    # valid edge cases
+    assert mod._read_lane_config(None, {"config": {"threshold": 0.0}})["threshold"] == 0.0
+    assert mod._read_lane_config(None, {"config": {"threshold": 1.0}})["threshold"] == 1.0
+    assert mod._read_lane_config(None, {"config": {"timeout_s": 1}})["timeout_s"] == 1
+    assert mod._read_lane_config(None, {"config": {"timeout_s": "7"}})["timeout_s"] == 7
+
+
+def test_invalid_config_values_fail_open_no_egress():
+    import src.turn_completion_nudge as mod
+
+    ctx, injected = _make_ctx()
+    with patch(f"{MODULE}._jev_score", return_value=0.1) as mock_score:
+        _call(
+            ctx,
+            **_hook_kwargs(
+                config={
+                    "send_turn_text": True,
+                    "enabled": True,
+                    "threshold": float("nan"),
+                    "timeout_s": 0,
+                }
+            ),
+        )
+    # Invalid config falls back to safe defaults; threshold default 0.2 means 0.1 still nudges.
+    assert injected == [_NUDGE_MESSAGE]
+    mock_score.assert_called_once()
+    _, kwargs = mock_score.call_args
+    assert kwargs["timeout_s"] == 4
+    snap = mod._METRICS.snapshot()
+    assert snap["total_calls"] == 1
+    assert snap["metric_events"] == 2  # lane_openrouter + nudge_injected
+    assert snap["buckets"]["nudge_injected"] == 1
+
+
+def test_forced_out_of_order_concurrent_writes_final_persisted_matches_memory(tmp_path, monkeypatch):
+    """Deterministic race: force older snapshot commit attempt after newer commit.
+
+    Final persisted snapshot must equal the in-memory state despite out-of-order
+    writer scheduling. Asserts persisted JSON fields and schema, not only return values.
+    """
+    import src.turn_completion_nudge as mod
+
+    state_file = tmp_path / "state" / "metrics.json"
+    monkeypatch.setattr(mod, "_state_path", lambda: str(state_file))
+    monkeypatch.setattr(mod, "_LAST_PERSISTED_SEQ", 0)
+
+    m = Metrics()
+    real_persist = mod._persist_snapshot
+    first_before_commit = threading.Event()
+    allow_first_commit = threading.Event()
+    second_committed = threading.Event()
+    state = {"first_seen": False}
+
+    def wrapped_persist(snapshot):
+        seq = int(snapshot.get("snapshot_seq", 0))
+        if seq == 1 and not state["first_seen"]:
+            state["first_seen"] = True
+            first_before_commit.set()
+            assert allow_first_commit.wait(timeout=5)
+        real_persist(snapshot)
+        if seq == 2:
+            second_committed.set()
+
+    monkeypatch.setattr(mod, "_persist_snapshot", wrapped_persist)
+
+    # seq1: older writer starts, pauses before commit.
+    t1 = threading.Thread(target=lambda: m.record("skipped"), name="older-writer")
+    t1.start()
+    assert first_before_commit.wait(timeout=5)
+
+    # seq2: newer writer commits while older is paused.
+    t2 = threading.Thread(target=lambda: m.record("scored"), name="newer-writer")
+    t2.start()
+    assert second_committed.wait(timeout=5)
+
+    # Allow older writer to attempt commit; seq guard must reject it.
+    allow_first_commit.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert not t1.is_alive()
+    assert not t2.is_alive()
+
+    snap = m.snapshot()
+    assert snap["metric_events"] == 2
+    assert snap["total_calls"] == 0
+    assert snap["buckets"]["skipped"] == 1
+    assert snap["buckets"]["scored"] == 1
+    assert snap["invariant_ok"] is True
+
+    raw = json.loads(state_file.read_text(encoding="utf-8"))
+    # Assert persisted JSON fields and schema, not only return values.
+    assert raw["schema_version"] == 2
+    assert raw["total_calls"] == snap["total_calls"]
+    assert raw["metric_events"] == snap["metric_events"]
+    assert raw["legacy_metric_events"] == snap["legacy_metric_events"]
+    assert raw["buckets"] == snap["buckets"]
+    assert raw["invariant_ok"] is True
+    assert raw["count_scope"] == snap["count_scope"]
+    assert raw["count_epoch"] == snap["count_epoch"]
+    assert raw["snapshot_seq"] == snap["snapshot_seq"]
+    assert isinstance(raw["last_updated"], str) and raw["last_updated"]
+
+    # Final persisted snapshot equals in-memory state.
+    loaded = mod._load_persisted_snapshot()
+    assert loaded is not None
+    for key in ("schema_version", "total_calls", "metric_events", "legacy_metric_events",
+                "buckets", "invariant_ok", "count_scope", "count_epoch", "snapshot_seq"):
+        assert loaded[key] == snap[key]

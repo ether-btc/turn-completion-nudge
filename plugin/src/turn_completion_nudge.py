@@ -46,6 +46,18 @@ _SERVED_MODEL: str | None = None
 # Last lane config read live in this process (process-local).
 _LAST_LANE_CONFIG: dict[str, Any] = {}
 
+# Persisted metrics schema.
+_METRICS_SCHEMA_VERSION = 2
+_HOOK_CALL_SCOPE_V2 = "enabled_post_llm_call_invocations_v2"
+
+# Persistence serialization: writers hold _PERSIST_LOCK only around the
+# "is this seq newer?" check and the atomic file replace, never while holding
+# Metrics._lock. This guarantees an older snapshot cannot overwrite a newer one
+# even when concurrent recorders persist out of scheduling order. I/O happens
+# under _PERSIST_LOCK (serializing writes) but outside Metrics._lock.
+_PERSIST_LOCK = threading.Lock()
+_LAST_PERSISTED_SEQ = 0
+
 
 def _state_path() -> str:
     """Return the metrics state file path inside the plugin directory (resolved at call time)."""
@@ -57,8 +69,45 @@ def _is_nonneg_int_not_bool(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def _is_pos_int_not_bool(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _default_buckets() -> dict[str, int]:
+    return {
+        "skipped": 0,
+        "scored": 0,
+        "nudge_injected": 0,
+        "no_nudge": 0,
+        "error": 0,
+        "dormant": 0,
+        "lane_openrouter": 0,
+        "lane_amos": 0,
+        "lane_failed": 0,
+    }
+
+
+def _normalize_buckets(raw: Any) -> dict[str, int] | None:
+    if not isinstance(raw, dict):
+        return None
+    buckets = _default_buckets()
+    for k, v in raw.items():
+        if not isinstance(k, str) or not _is_nonneg_int_not_bool(v):
+            return None
+        buckets[k] = int(v)
+    return buckets
+
+
 def _load_persisted_snapshot(path: str | None = None) -> dict[str, Any] | None:
-    """Load and validate a persisted metrics snapshot; None on missing/invalid (fail-open)."""
+    """Load, validate and migrate a persisted metrics snapshot.
+
+    Returns None on missing/invalid content (fail-open). v1 snapshots used
+    total_calls as the bucket-event total; migration retains that value as
+    legacy_metric_events/metric_events, starts accurate v2 hook-call total_calls
+    at 0, and records an explicit migration epoch. Historical hook-call counts
+    are never fabricated.
+    """
+    global _LAST_PERSISTED_SEQ
     if path is None:
         path = _state_path()
     try:
@@ -66,45 +115,113 @@ def _load_persisted_snapshot(path: str | None = None) -> dict[str, Any] | None:
             data = json.load(fh)
         if not isinstance(data, dict):
             return None
-        total_calls = data.get("total_calls")
-        buckets = data.get("buckets")
-        if not _is_nonneg_int_not_bool(total_calls):
+
+        schema_version = data.get("schema_version", 1)
+        buckets = _normalize_buckets(data.get("buckets"))
+        if buckets is None:
             return None
-        if not isinstance(buckets, dict):
-            return None
-        for k, v in buckets.items():
-            if not isinstance(k, str) or not _is_nonneg_int_not_bool(v):
-                return None
-        total = sum(buckets.values())
-        if total_calls != total:
-            return None
-        # Recompute the invariant from the persisted numbers; never trust the file's own flag.
-        invariant_ok = (total_calls == total)
+        metric_events = sum(buckets.values())
         last_updated = data.get("last_updated")
         if not isinstance(last_updated, str):
             last_updated = ""
-        return {
-            "total_calls": total_calls,
-            "buckets": dict(buckets),
-            "invariant_ok": invariant_ok,
-            "last_updated": last_updated,
-        }
+        seq = data.get("snapshot_seq", 0)
+        if not _is_nonneg_int_not_bool(seq):
+            seq = 0
+
+        if schema_version == 1:
+            total_calls_raw = data.get("total_calls")
+            if not _is_nonneg_int_not_bool(total_calls_raw):
+                return None
+            # v1 invariant: total_calls was the bucket-event total.
+            if int(total_calls_raw) != metric_events:
+                return None
+            legacy_metric_events = int(total_calls_raw)
+            snapshot = {
+                "schema_version": _METRICS_SCHEMA_VERSION,
+                "total_calls": 0,  # accurate v2 hook calls start at migration epoch
+                "metric_events": metric_events,
+                "legacy_metric_events": legacy_metric_events,
+                "buckets": buckets,
+                "invariant_ok": metric_events == sum(buckets.values()),
+                "last_updated": last_updated,
+                "count_scope": _HOOK_CALL_SCOPE_V2,
+                "count_epoch": "migrated_from_v1",
+                "snapshot_seq": seq,
+            }
+        elif schema_version == _METRICS_SCHEMA_VERSION:
+            total_calls = data.get("total_calls")
+            metric_events_raw = data.get("metric_events")
+            if not _is_nonneg_int_not_bool(total_calls):
+                return None
+            if not _is_nonneg_int_not_bool(metric_events_raw):
+                return None
+            if int(metric_events_raw) != metric_events:
+                return None
+            legacy_metric_events = data.get("legacy_metric_events", 0)
+            if not _is_nonneg_int_not_bool(legacy_metric_events):
+                legacy_metric_events = 0
+            count_scope = data.get("count_scope")
+            if not isinstance(count_scope, str) or not count_scope:
+                count_scope = _HOOK_CALL_SCOPE_V2
+            count_epoch = data.get("count_epoch")
+            if not isinstance(count_epoch, str) or not count_epoch:
+                count_epoch = "v2"
+            snapshot = {
+                "schema_version": _METRICS_SCHEMA_VERSION,
+                "total_calls": int(total_calls),
+                "metric_events": metric_events,
+                "legacy_metric_events": int(legacy_metric_events),
+                "buckets": buckets,
+                "invariant_ok": metric_events == sum(buckets.values()),
+                "last_updated": last_updated,
+                "count_scope": count_scope,
+                "count_epoch": count_epoch,
+                "snapshot_seq": seq,
+            }
+        else:
+            return None
+
+        with _PERSIST_LOCK:
+            if seq > _LAST_PERSISTED_SEQ:
+                _LAST_PERSISTED_SEQ = seq
+        return snapshot
     except (OSError, ValueError, TypeError) as exc:  # fail-open
         logger.debug("turn-completion-nudge: failed to load persisted metrics: %s", exc)
         return None
 
 
 def _persist_snapshot(snapshot: dict[str, Any]) -> None:
-    """Persist a metrics snapshot atomically to state/metrics.json (fail-open)."""
+    """Persist a metrics snapshot atomically to state/metrics.json (fail-open).
+
+    Serialization guarantee: snapshots carry a monotonic snapshot_seq assigned
+    under Metrics._lock. Writers may perform file I/O concurrently; the final
+    commit is serialized by _PERSIST_LOCK and only applied when snapshot_seq is
+    newer than the last persisted seq. This prevents older snapshots from
+    overwriting newer state even under out-of-order writer scheduling.
+    Metrics._lock is never held during file I/O.
+    """
+    global _LAST_PERSISTED_SEQ
     path = _state_path()
     try:
+        seq = snapshot.get("snapshot_seq", 0)
+        if not _is_nonneg_int_not_bool(seq):
+            seq = 0
+        with _PERSIST_LOCK:
+            if seq <= _LAST_PERSISTED_SEQ:
+                return
         state_dir = os.path.dirname(path)
         os.makedirs(state_dir, exist_ok=True)
         payload = {
+            "schema_version": _METRICS_SCHEMA_VERSION,
             "total_calls": int(snapshot.get("total_calls", 0)),
+            "metric_events": int(snapshot.get("metric_events", 0)),
+            "legacy_metric_events": int(snapshot.get("legacy_metric_events", 0)),
             "buckets": dict(snapshot.get("buckets", {})),
             "invariant_ok": bool(snapshot.get("invariant_ok", False)),
             "last_updated": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "count_scope": str(snapshot.get("count_scope", _HOOK_CALL_SCOPE_V2)),
+            "count_epoch": str(snapshot.get("count_epoch", "v2")),
+            "snapshot_seq": int(seq),
         }
         fd, tmp = tempfile.mkstemp(dir=state_dir, prefix=".metrics.", suffix=".tmp")
         try:
@@ -112,7 +229,11 @@ def _persist_snapshot(snapshot: dict[str, Any]) -> None:
                 json.dump(payload, fh, separators=(",", ":"), sort_keys=True)
                 fh.flush()
                 os.fsync(fh.fileno())
-            os.replace(tmp, path)
+            with _PERSIST_LOCK:
+                if seq <= _LAST_PERSISTED_SEQ:
+                    return
+                os.replace(tmp, path)
+                _LAST_PERSISTED_SEQ = seq
         finally:
             try:
                 if os.path.exists(tmp):
@@ -158,73 +279,104 @@ def _validate_openrouter_api_key(api_key: str | None) -> str | None:
 
 
 class Metrics:
-    """Thread-safe outcome counters with an invariant.
+    """Thread-safe outcome counters with persisted v2 schema.
 
-    Buckets are keyed by outcome strings ("skipped", "scored",
-    "nudge_injected", "no_nudge", "error"). The invariant
-    total_calls == sum(buckets) is asserted on every mutation.
+    Semantics (v2):
+    - total_calls: enabled post_llm_call hook invocations, counted exactly once
+      per invocation (including skip, dormant, lane failure, and outer error
+      paths). Disabled-hook no-op calls are not counted. This counter starts at 0
+      for the migration epoch when upgrading a v1 snapshot; historical hook-call
+      counts are never fabricated.
+    - metric_events: number of bucket-record increments; invariant is
+      metric_events == sum(buckets).
+    - legacy_metric_events: retained v1 bucket-event total when migrated.
+
+    Persistence serialization: each mutation increments snapshot_seq under
+    Metrics._lock, then persists outside the lock. _persist_snapshot only writes
+    if snapshot_seq is newer than the last persisted seq, preventing
+    out-of-order writer scheduling from overwriting newer state. File I/O is
+    never performed while holding Metrics._lock.
     """
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._total_calls: int = 0
-        self._buckets: dict[str, int] = {
-            "skipped": 0,
-            "scored": 0,
-            "nudge_injected": 0,
-            "no_nudge": 0,
-            "error": 0,
-            "dormant": 0,
-            "lane_openrouter": 0,
-            "lane_amos": 0,
-            "lane_failed": 0,
-        }
+        self._total_calls: int = 0  # enabled hook invocations (v2 scope)
+        self._metric_events: int = 0  # bucket-record increments
+        self._legacy_metric_events: int = 0
+        self._count_scope: str = _HOOK_CALL_SCOPE_V2
+        self._count_epoch: str = "v2"
+        self._snapshot_seq: int = 0
+        self._buckets: dict[str, int] = _default_buckets()
         self._recent_scores: "deque[float]" = deque(maxlen=5)
         # Load persisted snapshot into this instance (fail-open).
         try:
             loaded = _load_persisted_snapshot()
             if loaded is not None:
-                self._total_calls = loaded["total_calls"]
-                # Keep known buckets and merge any persisted extras.
-                merged = dict(self._buckets)
-                merged.update(loaded["buckets"])
+                self._total_calls = int(loaded.get("total_calls", 0))
+                self._metric_events = int(loaded.get("metric_events", 0))
+                self._legacy_metric_events = int(loaded.get("legacy_metric_events", 0))
+                self._count_scope = str(loaded.get("count_scope", _HOOK_CALL_SCOPE_V2))
+                self._count_epoch = str(loaded.get("count_epoch", "v2"))
+                self._snapshot_seq = int(loaded.get("snapshot_seq", 0))
+                merged = _default_buckets()
+                merged.update(dict(loaded.get("buckets", {})))
                 self._buckets = merged
         except (OSError, ValueError, TypeError):  # fail-open
             self._total_calls = 0
-            self._buckets = {
-                "skipped": 0,
-                "scored": 0,
-                "nudge_injected": 0,
-                "no_nudge": 0,
-                "error": 0,
-                "dormant": 0,
-                "lane_openrouter": 0,
-                "lane_amos": 0,
-                "lane_failed": 0,
-            }
+            self._metric_events = 0
+            self._legacy_metric_events = 0
+            self._count_scope = _HOOK_CALL_SCOPE_V2
+            self._count_epoch = "v2"
+            self._snapshot_seq = 0
+            self._buckets = _default_buckets()
 
     def _assert_invariant(self) -> None:
         total = sum(self._buckets.values())
-        if self._total_calls != total:
+        if self._metric_events != total:
             raise AssertionError(
-                f"metrics invariant violated: total_calls={self._total_calls} "
+                f"metrics invariant violated: metric_events={self._metric_events} "
                 f"!= sum(buckets)={total} buckets={self._buckets!r}"
             )
 
+    def _snapshot_locked(self) -> dict[str, Any]:
+        total = sum(self._buckets.values())
+        return {
+            "schema_version": _METRICS_SCHEMA_VERSION,
+            "total_calls": self._total_calls,
+            "metric_events": self._metric_events,
+            "legacy_metric_events": self._legacy_metric_events,
+            "buckets": dict(self._buckets),
+            "invariant_ok": self._metric_events == total,
+            "recent_scores": list(self._recent_scores),
+            "count_scope": self._count_scope,
+            "count_epoch": self._count_epoch,
+            "snapshot_seq": self._snapshot_seq,
+        }
+
+    def _persist_current(self) -> None:
+        with self._lock:
+            snap = self._snapshot_locked()
+        # Persist AFTER releasing Metrics._lock; _persist_snapshot is fail-open.
+        _persist_snapshot(snap)
+
     def record(self, outcome: str) -> None:
-        """Increment total_calls and the bucket for outcome."""
+        """Increment metric_events and the bucket for outcome."""
         with self._lock:
             if outcome not in self._buckets:
                 self._buckets[outcome] = 0
-            self._total_calls += 1
+            self._metric_events += 1
             self._buckets[outcome] = self._buckets.get(outcome, 0) + 1
+            self._snapshot_seq += 1
             self._assert_invariant()
-            snap = {
-                "total_calls": self._total_calls,
-                "buckets": dict(self._buckets),
-                "invariant_ok": True,
-            }
-        # Persist AFTER the invariant assertion; _persist_snapshot is fail-open by contract.
+            snap = self._snapshot_locked()
+        _persist_snapshot(snap)
+
+    def record_hook_call(self) -> None:
+        """Count one enabled post_llm_call invocation (v2 total_calls scope)."""
+        with self._lock:
+            self._total_calls += 1
+            self._snapshot_seq += 1
+            snap = self._snapshot_locked()
         _persist_snapshot(snap)
 
     def record_score(self, score: Any) -> None:
@@ -237,16 +389,9 @@ class Metrics:
             self._recent_scores.append(value)
 
     def snapshot(self) -> dict[str, Any]:
-        """Return a copy of counters plus an invariant_ok boolean."""
+        """Return a copy of counters plus invariant and scope metadata."""
         with self._lock:
-            total = sum(self._buckets.values())
-            invariant_ok = self._total_calls == total
-            return {
-                "total_calls": self._total_calls,
-                "buckets": dict(self._buckets),
-                "invariant_ok": invariant_ok,
-                "recent_scores": list(self._recent_scores),
-            }
+            return self._snapshot_locked()
 
 
 _METRICS = Metrics()
@@ -425,6 +570,59 @@ def _parse_strict_bool(value: Any, default: bool) -> bool:
     return bool(value) if value is not None else default
 
 
+def _validate_threshold(value: Any) -> float:
+    """Accept only finite numeric threshold in [0,1]; reject bool/NaN/out-of-range.
+
+    Invalid values warn and fall back to the documented safe default. No silent
+    clamping: out-of-range finite values are rejected.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        logger.warning(
+            "turn-completion-nudge: invalid threshold %r; using default %s",
+            value,
+            _DEFAULT_THRESHOLD,
+        )
+        return _DEFAULT_THRESHOLD
+    threshold = float(value)
+    if not (threshold == threshold and threshold >= 0.0 and threshold <= 1.0):  # NaN/inf/range
+        logger.warning(
+            "turn-completion-nudge: invalid threshold %r; using default %s",
+            value,
+            _DEFAULT_THRESHOLD,
+        )
+        return _DEFAULT_THRESHOLD
+    return threshold
+
+
+def _validate_timeout_s(value: Any) -> int:
+    """Accept only positive integer timeout_s; reject bool/float/non-integral/<=0.
+
+    Invalid values warn and fall back to the documented safe default.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        # Accept integral numeric strings only if they are strict integer forms.
+        if isinstance(value, str):
+            text = value.strip()
+            if text.isdigit():
+                parsed = int(text)
+                if parsed > 0:
+                    return parsed
+        logger.warning(
+            "turn-completion-nudge: invalid timeout_s %r; using default %s",
+            value,
+            _DEFAULT_TIMEOUT_S,
+        )
+        return _DEFAULT_TIMEOUT_S
+    if value <= 0:
+        logger.warning(
+            "turn-completion-nudge: invalid timeout_s %r; using default %s",
+            value,
+            _DEFAULT_TIMEOUT_S,
+        )
+        return _DEFAULT_TIMEOUT_S
+    return int(value)
+
+
 def _read_lane_config(ctx: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     """Read the full lane config live (enabled, send_turn_text, models, threshold, timeout, amos fallback)."""
     enabled = _config_get(ctx, kwargs, "enabled", True)
@@ -439,16 +637,8 @@ def _read_lane_config(ctx: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     amos_model = _config_get(ctx, kwargs, "amos_model", _DEFAULT_AMOS_MODEL)
     amos_fallback = _config_get(ctx, kwargs, "amos_fallback", False)
     amos_base_url = _config_get(ctx, kwargs, "amos_base_url", _DEFAULT_AMOS_URL)
-    threshold = _config_get(ctx, kwargs, "threshold", _DEFAULT_THRESHOLD)
-    timeout_s = _config_get(ctx, kwargs, "timeout_s", _DEFAULT_TIMEOUT_S)
-    try:
-        timeout_s = int(timeout_s)
-    except (TypeError, ValueError):
-        timeout_s = _DEFAULT_TIMEOUT_S
-    try:
-        threshold = float(threshold)
-    except (TypeError, ValueError):
-        threshold = _DEFAULT_THRESHOLD
+    threshold = _validate_threshold(_config_get(ctx, kwargs, "threshold", _DEFAULT_THRESHOLD))
+    timeout_s = _validate_timeout_s(_config_get(ctx, kwargs, "timeout_s", _DEFAULT_TIMEOUT_S))
     return {
         "enabled": _parse_strict_bool(enabled, True),
         "send_turn_text": _parse_strict_bool(send_turn_text, False),
@@ -721,11 +911,21 @@ class TurnCompletionNudge:
         as a harmless fallback. The whole body is wrapped in try/except; this
         hook never blocks and never raises.
         """
+        counted_hook_call = False
         try:
             ctx = self.ctx if self.ctx is not None else kwargs.get("ctx")
 
             if not _read_enabled(ctx, kwargs):
                 return None
+
+            # Enabled hook invocation: count exactly once, including skip,
+            # dormant, lane failure, and outer-error paths. Disabled no-op above
+            # is intentionally not counted.
+            try:
+                _METRICS.record_hook_call()
+                counted_hook_call = True
+            except Exception:  # fail-open
+                pass
 
             tier = str(kwargs.get("tier") or "").strip().lower()
             final_text = _get_final_text(kwargs)
@@ -853,6 +1053,10 @@ class TurnCompletionNudge:
             )
             try:
                 _METRICS.record("error")
+                if not counted_hook_call:
+                    # Best-effort: keep hook-call accounting aligned if the
+                    # invocation count failed before we recorded it.
+                    _METRICS.record_hook_call()
             except Exception:
                 pass
             return None
@@ -867,16 +1071,25 @@ def _setup_status_cli(subparser):
 
 
 def _status_cli(args):
-    """Print the turn-completion-nudge status (counters persisted; lane config process-local)."""
+    """Print the turn-completion-nudge status.
+
+    Counters (total_calls/metric_events/buckets) are persisted across processes.
+    Lane config and last_scores are process-local observability.
+    """
     import json as _json
 
     path = _state_path()
     loaded = _load_persisted_snapshot(path)
     if loaded is not None:
         source = "persisted"
-        total_calls = loaded["total_calls"]
-        buckets = dict(loaded["buckets"])
-        invariant_ok = (total_calls == sum(buckets.values()))
+        total_calls = int(loaded.get("total_calls", 0))
+        metric_events = int(loaded.get("metric_events", sum(dict(loaded.get("buckets", {})).values())))
+        legacy_metric_events = int(loaded.get("legacy_metric_events", 0))
+        buckets = dict(loaded.get("buckets", {}))
+        invariant_ok = metric_events == sum(buckets.values())
+        count_scope = str(loaded.get("count_scope", _HOOK_CALL_SCOPE_V2))
+        count_epoch = str(loaded.get("count_epoch", "v2"))
+        schema_version = int(loaded.get("schema_version", _METRICS_SCHEMA_VERSION))
         try:
             last_updated = datetime.datetime.fromtimestamp(
                 os.path.getmtime(path), tz=datetime.timezone.utc
@@ -886,9 +1099,14 @@ def _status_cli(args):
     else:
         source = "process"
         proc = _METRICS.snapshot()
-        total_calls = proc.get("total_calls", 0)
+        total_calls = int(proc.get("total_calls", 0))
+        metric_events = int(proc.get("metric_events", sum(dict(proc.get("buckets", {})).values())))
+        legacy_metric_events = int(proc.get("legacy_metric_events", 0))
         buckets = dict(proc.get("buckets", {}))
-        invariant_ok = (total_calls == sum(buckets.values()))
+        invariant_ok = metric_events == sum(buckets.values())
+        count_scope = str(proc.get("count_scope", _HOOK_CALL_SCOPE_V2))
+        count_epoch = str(proc.get("count_epoch", "v2"))
+        schema_version = int(proc.get("schema_version", _METRICS_SCHEMA_VERSION))
         last_updated = ""
 
     cfg = dict(_LAST_LANE_CONFIG) or {
@@ -902,7 +1120,7 @@ def _status_cli(args):
     proc_snap = _METRICS.snapshot()
     out = {
         "command": "turn-completion-nudge status",
-        "process_local": True,
+        "schema_version": schema_version,
         "source": source,
         "last_updated": last_updated,
         "enabled": cfg.get("enabled", True),
@@ -912,24 +1130,33 @@ def _status_cli(args):
         "amos_model": cfg.get("amos_model"),
         "timeout_s": cfg.get("timeout_s"),
         "last_scores": list(proc_snap.get("recent_scores", [])),
+        "last_scores_scope": "process_local",
         "buckets": buckets,
         "total_calls": total_calls,
+        "total_calls_scope": count_scope,
+        "total_calls_epoch": count_epoch,
+        "metric_events": metric_events,
+        "legacy_metric_events": legacy_metric_events,
         "invariant_ok": invariant_ok,
+        "lane_config_process_local": True,
     }
     if getattr(args, "json", False):
         print(_json.dumps(out, indent=2))
     else:
-        print(f"turn-completion-nudge status (counters: {source}; lane config: process-local):")
+        print(f"turn-completion-nudge status (counters: {source}; lane config/last_scores: process-local):")
         print(f"  enabled: {out['enabled']}")
         print(f"  opted_in (send_turn_text): {out['opted_in']}")
         print(f"  threshold: {out['threshold']}")
         print(f"  scorer_model: {out['scorer_model']}")
         print(f"  amos_model: {out['amos_model']}")
         print(f"  timeout_s: {out['timeout_s']}")
-        print(f"  last_scores: {out['last_scores']}")
+        print(f"  last_scores (process-local): {out['last_scores']}")
         print(f"  buckets: {out['buckets']}")
-        print(f"  total_calls: {out['total_calls']}")
-        print(f"  invariant_ok: {out['invariant_ok']}")
+        print(f"  total_calls ({out['total_calls_scope']}, epoch={out['total_calls_epoch']}): {out['total_calls']}")
+        print(f"  metric_events: {out['metric_events']}")
+        print(f"  legacy_metric_events: {out['legacy_metric_events']}")
+        print(f"  invariant_ok (metric_events == sum(buckets)): {out['invariant_ok']}")
+        print(f"  schema_version: {out['schema_version']}")
         print(f"  source: {out['source']}")
         print(f"  last_updated: {out['last_updated']}")
 

@@ -5,22 +5,20 @@ Hermes plugin: nudges the agent to continue when a turn ends prematurely (planni
 ## Badges
 
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/ether-btc/turn-completion-nudge/actions)
-[![Version](https://img.shields.io/badge/version-0.3.1-blue.svg)](https://github.com/ether-btc/turn-completion-nudge/releases/tag/v0.3.1)
+[![Version](https://img.shields.io/badge/version-0.3.4-blue.svg)](https://github.com/ether-btc/turn-completion-nudge)
 [![Hermes](https://img.shields.io/badge/hermes-%3E=0.21.3-blue.svg)](https://github.com/NousResearch/hermes-agent)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-
-> Scaffold note: this repo is git-ready locally with no remote configured; badge targets and network push are operator-gated and come later.
 
 ## What you get
 
 A standalone Hermes plugin (`kind: standalone`, `requires_hermes: >=0.21.3`) that scores each completed turn and, when the turn looks incomplete, injects a one-off continuation nudge.
 
 - Hooks: `post_llm_call` (fail-open — scoring or network problems never block a turn)
-- Commands: `hermes turn-completion-nudge status` (persisted counts readable from a separate process: enabled/opted-in/threshold/last-5-scores/bucket counts, source/last_updated)
+- Commands: `hermes turn-completion-nudge status` (persisted counters readable from a separate process: enabled/opted-in/threshold/bucket counts, `total_calls` hook-invocation count with scope/epoch, `metric_events`/`legacy_metric_events`, source/last_updated; `last_scores` and lane config are process-local observability)
 - Scorer lane ladder: OpenRouter decisions lane first (`scorer_model`, key from `OPENROUTER_API_KEY`); the keyless Amos systemone fallback is a **separate opt-in** (`amos_fallback`, default off — OpenRouter failure without it records `lane_failed` and stops, no second third-party egress); buckets `lane_openrouter` / `lane_amos` / `lane_failed` / `dormant`; served model logged per call
 - Privacy: `send_turn_text` defaults to false — dormant by default, no scoring calls, no egress
 - Nudge hygiene: bounded per-turn guard (cap 1024, drop-oldest) plus a consecutive-nudge cap of 2 (nudge-driven turns are recognized by the injected text and the chain stops after two hops)
-- Resource hygiene: bounded per-turn guard (cap 1024, drop-oldest), persisted counters inside the plugin directory (`state/metrics.json`), zero writes outside the plugin directory
+- Resource hygiene: bounded per-turn guard (cap 1024, drop-oldest), persisted counter snapshot inside the plugin directory (`state/metrics.json`), zero writes outside the plugin directory
 - Hardware fitness: pure stdlib (`urllib`, `json`, `threading`); measured Pi5 round-trips under 5 s — see `docs/pi5_evidence.json`
 
 ## Install
@@ -51,8 +49,8 @@ Config schema (settings form, read live per call via `ctx.get_config`):
 | --- | --- | --- | --- |
 | `enabled` | bool | true | Master switch; false = dormant hook no-op |
 | `send_turn_text` | bool | false | Opt in to sending clipped turn text for scoring (see privacy disclosure) |
-| `threshold` | float | 0.2 | Score below this triggers a continuation nudge (0–1) |
-| `timeout_s` | int | 4 | Per-hop scorer timeout in seconds |
+| `threshold` | float | 0.2 | Score below this triggers a continuation nudge. Valid: finite number in `[0, 1]`; invalid/NaN/out-of-range values warn and fall back to `0.2` (no silent clamping) |
+| `timeout_s` | int | 4 | Per-hop scorer timeout in seconds. Valid: positive integer (`>0`); invalid/zero/negative/bool/non-integral values warn and fall back to `4` |
 | `scorer_model` | str | `respan/span-01-lite-20260925:free` | OpenRouter decisions model; models can be delisted (rot) — pin or monitor |
 | `amos_model` | str | `medium` | Keyless Amos systemone fallback model, used ONLY when `amos_fallback` is true (server may serve smaller — log the served id) |
 | `amos_fallback` | bool | false | Second opt-in: allow the keyless Amos/Scira systemone hop on OpenRouter missing key / failure / timeout. Off by default — no second third-party service without an explicit yes |
@@ -63,19 +61,19 @@ Config schema (settings form, read live per call via `ctx.get_config`):
 - Settings: `enabled: false` turns the hook off (dormant: one INFO line per enable session, no scoring calls, no egress).
 - CLI: `hermes plugins disable turn-completion-nudge` unregisters the hook; `hermes plugins enable turn-completion-nudge` restores it.
 
-## Uninstall / No-Residue Guarantees
+## Uninstall and residual config
 
-`hermes plugins remove turn-completion-nudge` removes the plugin directory from `~/.hermes/plugins/turn-completion-nudge/`.
+`hermes plugins remove turn-completion-nudge` removes the plugin directory from `~/.hermes/plugins/turn-completion-nudge/`, including the persisted `state/metrics.json` snapshot that lives inside that directory.
 
 - No background threads or timers survive removal — the bounded guard is in-process and cleared on restart.
-- No writes outside the plugin directory; counters are in-process only.
-- The config keys under `plugins.entries.turn-completion-nudge.*` (`enabled`, `send_turn_text`…) are left as dormant, harmless keys after removal — remove them manually from settings, or accept them as dormant.
+- The plugin writes only inside its own plugin directory; removing that directory removes its persisted counter snapshot.
+- The config keys under `plugins.entries.turn-completion-nudge.*` (`enabled`, `send_turn_text`…) may remain in Hermes settings as dormant, harmless keys after removal — remove them manually from settings, or accept them as dormant.
 
 ## Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
-| No nudge despite incomplete turns | `hermes turn-completion-nudge status` (process-local): enabled/opted-in, threshold, buckets, last 5 scores |
+| No nudge despite incomplete turns | `hermes turn-completion-nudge status`: counters (`total_calls` hook-invocation scope/epoch, `metric_events`, buckets, source/last_updated) are persisted across processes; `last_scores` and lane config are process-local observability |
 | OpenRouter lane silent | `hermes logs` — an empty or placeholder `OPENROUTER_API_KEY` warns exactly once; with `amos_fallback: false` (default) no further egress happens |
 | All scorer lanes failed | `lane_failed` bucket increments; the hook returns `None` (fail-open, the turn continues) |
 | Debug | `HERMES_*_DEBUG` flags plus `hermes logs`; each scored call logs its lane, score, and served model |

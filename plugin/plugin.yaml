@@ -1,5 +1,5 @@
 name: turn-completion-nudge
-version: "0.3.3"
+version: "0.3.4"
 description: "Nudges the agent to continue when a turn ends prematurely (planning or announcing next steps it has not done). Fail-open: never blocks a turn."
 author: "ether-btc"
 kind: standalone
@@ -25,12 +25,12 @@ config_schema:
     type: float
     default: 0.2
     label: Threshold
-    description: Score below this value triggers a continuation nudge (0-1).
+    description: "Score below this value triggers a continuation nudge. Valid range: finite number in [0, 1]; invalid/NaN/out-of-range values warn and fall back to 0.2 (no silent clamping)."
   timeout_s:
     type: int
     default: 4
     label: Timeout seconds
-    description: Per-hop scorer timeout in seconds.
+    description: "Per-hop scorer timeout in seconds. Valid value: positive integer (>0); invalid/zero/negative/bool/non-integral values warn and fall back to 4."
   scorer_model:
     type: str
     default: respan/span-01-lite-20260925:free
