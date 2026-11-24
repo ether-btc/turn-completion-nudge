@@ -5,7 +5,7 @@ Hermes plugin: nudges the agent to continue when a turn ends prematurely (planni
 ## Badges
 
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/ether-btc/turn-completion-nudge/actions)
-[![Version](https://img.shields.io/badge/version-0.3.4-blue.svg)](https://github.com/ether-btc/turn-completion-nudge)
+[![Version](https://img.shields.io/badge/version-0.3.4-blue.svg)](https://github.com/ether-btc/turn-completion-nudge/releases/tag/v0.3.4)
 [![Hermes](https://img.shields.io/badge/hermes-%3E=0.21.3-blue.svg)](https://github.com/NousResearch/hermes-agent)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
